@@ -11,8 +11,8 @@
 | Milestone | State | PR | Notes |
 |---|---|---|---|
 | M0 zenoh smoke test | done | n/a | Passed, see below |
-| M1 skeleton + CI | in progress | | |
-| M2 CPU filter | pending | | |
+| M1 skeleton + CI | done | [#1](https://github.com/Arsh624/ros2-gpu-pointcloud/pull/1) | CI on main: https://github.com/Arsh624/ros2-gpu-pointcloud/actions/runs/44019966683 |
+| M2 CPU filter | in review | | 24 tests pass, node verified with backend cpu |
 | M3 CUDA filter | pending | | |
 | M4 benchmark + profile | pending | | |
 | M5 networking | pending | | |
@@ -107,20 +107,20 @@ ZENOH_CONFIG_OVERRIDE='connect/endpoints=["tcp/router:7447"];listen/endpoints=["
 `connect/endpoints` alone is not enough. With the default `listen` endpoint (`tcp/localhost:0`) topics are discovered through the router but no data arrives, because the nodes advertise a loopback address that the other container cannot reach (`Unable to connect to any locator of scouted peer ... [tcp/[::1]:port]`).
 
 ### M1: skeleton + CI (branch `m1-skeleton`)
-- [ ] `.gitignore`, `.gitattributes`, `LICENSE`; `git init`; first commit excludes `BRIEF.local.md`.
-- [ ] `docker/Dockerfile` (digest-pinned) and `docker/compose.dev.yml`; image builds.
-- [ ] `gpu_pointcloud/package.xml`, `CMakeLists.txt` with the options above, headers, and a compiling core. Pass = `colcon build` inside the dev container.
-- [ ] `docs/ARCHITECTURE.md`, `docs/DESIGN.md` (with installed package versions), README stub, `CHANGELOG.md`.
-- [ ] `.github/workflows/ci.yml`: job `ros-cpu` in `ros:jazzy-ros-base` (build with `-DWITH_CUDA=OFF`, test, `colcon test-result --verbose`); job `cuda-compile` in the CUDA devel image (`cmake -DCORE_ONLY=ON` then build).
-- [ ] Create the GitHub repo, push, PR, CI green, merge, link the run here.
+- [x] `.gitignore`, `.gitattributes`, `LICENSE`; `git init`; first commit excludes `BRIEF.local.md`.
+- [x] `docker/Dockerfile` (digest-pinned) and `docker/compose.dev.yml`; image builds.
+- [x] `gpu_pointcloud/package.xml`, `CMakeLists.txt` with the options above, headers, and a compiling core. Pass = `colcon build` inside the dev container.
+- [x] `docs/ARCHITECTURE.md`, `docs/DESIGN.md` (with installed package versions), README stub, `CHANGELOG.md`.
+- [x] `.github/workflows/ci.yml`: job `ros-cpu` in `ros:jazzy-ros-base` (build with `-DWITH_CUDA=OFF`, test, `colcon test-result --verbose`); job `cuda-compile` in the CUDA devel image (`cmake -DCORE_ONLY=ON` then build).
+- [x] Create the GitHub repo, push, PR, CI green, merge, link the run here.
 
 ### M2: CPU filter (branch `m2-cpu-filter`)
-- [ ] `test/test_filter_cpu.cpp` first. Cases: empty input; all out of range; NaN and Inf dropped; exact min and max range kept; two points in one voxel give their mean; `x = 0.05` lands in index 1 and `x = -0.0001` in index -1; output ascending by key; 4x4x1 grid with hand-computed centroids; invalid params throw; index overflow counted. Run and show it failing.
-- [ ] `src/filter_cpu.cpp`: keys, `std::sort` of (key, index), linear reduce. Tests pass.
-- [ ] `src/synthetic.cpp` with a determinism test (two calls give identical bytes; size is `width * height`; contains NaN and beyond-range points).
-- [ ] `test/test_cloud_conv.cpp` first (rgb field, `point_step` 32, round trip; short data, missing field and big-endian throw), then `src/cloud_conv.cpp`.
-- [ ] `src/filter_node.cpp` with `backend`, `voxel_size`, `min_range`, `max_range`. Verify in the container with a one-shot publisher and `ros2 topic echo --once /output --field width`.
-- [ ] PR with output, merge.
+- [x] `test/test_filter_cpu.cpp` first. Cases: empty input; all out of range; NaN and Inf dropped; exact min and max range kept; two points in one voxel give their mean; `x = 0.05` lands in index 1 and `x = -0.0001` in index -1; output ascending by key; 4x4x1 grid with hand-computed centroids; invalid params throw; index overflow counted. Run and show it failing.
+- [x] `src/filter_cpu.cpp`: keys, `std::sort` of (key, index), linear reduce. Tests pass.
+- [x] `src/synthetic.cpp` with a determinism test (two calls give identical bytes; size is `width * height`; contains NaN and beyond-range points).
+- [x] `test/test_cloud_conv.cpp` first (rgb field, `point_step` 32, round trip; short data, missing field and big-endian throw), then `src/cloud_conv.cpp`.
+- [x] `src/filter_node.cpp` with `backend`, `voxel_size`, `min_range`, `max_range`. Verify in the container with a one-shot publisher and `ros2 topic echo --once /output --field width`.
+- [x] PR with output, merge.
 
 ### M3: CUDA filter (branch `m3-cuda-filter`)
 - [ ] `test/test_parity_cuda.cpp` first: 3 resolutions x voxel sizes {0.02, 0.05, 0.1}, equal count and max |delta| <= 1e-4; the M2 edge cases through CUDA; reserve-growth case; `GTEST_SKIP` when `cuda_device_present()` is false.
@@ -139,4 +139,7 @@ As written in the brief; expanded here when M4 is merged.
 
 ## Cuts and deviations
 
-None yet.
+
+
+- **`cloud_publisher_node` arrived in M2, not M5.** M2 needs a one-shot publisher of the synthetic cloud to verify the filter node, so the basic publisher was written now. M5 adds the latency listener and any rate or QoS options it needs.
+- **Two files beyond the brief's layout:** `include/gpu_pointcloud/detail/voxel_math.hpp` (per-point classification shared by the CPU code and the CUDA kernel, so both run identical arithmetic) and `test/filter_cases.hpp` (the edge-case suite, instantiated once per backend).
