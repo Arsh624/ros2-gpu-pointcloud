@@ -13,8 +13,8 @@
 | M0 zenoh smoke test | done | n/a | Passed, see below |
 | M1 skeleton + CI | done | [#1](https://github.com/Arsh624/ros2-gpu-pointcloud/pull/1) | CI on main: https://github.com/Arsh624/ros2-gpu-pointcloud/actions/runs/44019966683 |
 | M2 CPU filter | done | [#2](https://github.com/Arsh624/ros2-gpu-pointcloud/pull/2) | 24 tests pass, node verified with backend cpu |
-| M3 CUDA filter | in review | | Parity exact on RTX 4070; compute-sanitizer could not run under WSL2 (see cuts) |
-| M4 benchmark + profile | pending | | |
+| M3 CUDA filter | done | [#4](https://github.com/Arsh624/ros2-gpu-pointcloud/pull/4) | Parity exact on RTX 4070; compute-sanitizer could not run under WSL2 (see cuts) |
+| M4 benchmark + profile | in review | | 3.96x / 7.55x / 10.53x end-to-end at 320x240 / 640x480 / 1280x720; nsys has no GPU kernel data under WSL2 |
 | M5 networking | pending | | |
 | M6 README + polish | pending | | |
 | M7 release | pending | | |
@@ -129,10 +129,10 @@ ZENOH_CONFIG_OVERRIDE='connect/endpoints=["tcp/router:7447"];listen/endpoints=["
 - [x] Node verified with `backend:=cuda`. PR, merge.
 
 ### M4: benchmark + profile (branch `m4-benchmark`)
-- [ ] `bench/bench_filter.cpp`: flags `--backend`, `--res`, `--iters`, `--warmup`, `--csv`; 20 warmup + 200 timed; CUDA end-to-end and GPU-only timings; NVTX ranges per stage.
-- [ ] `scripts/bench.sh` writes `results/bench.csv` and `results/env.txt`. Sanity-check scaling before reporting.
-- [ ] `scripts/profile.sh`: `nsys profile -t cuda,nvtx`, then `nsys stats` to `results/nsys_summary.txt`. Fallback: per-stage cudaEvent timings.
-- [ ] PR with the table, merge.
+- [x] `bench/bench_filter.cpp`: flags `--backend`, `--res`, `--iters`, `--warmup`, `--csv`; 20 warmup + 200 timed; CUDA end-to-end and GPU-only timings; NVTX ranges per stage.
+- [x] `scripts/bench.sh` writes `results/bench.csv` and `results/env.txt`. Sanity-check scaling before reporting.
+- [x] `scripts/profile.sh`: `nsys profile -t cuda,nvtx`, then `nsys stats` to `results/nsys_summary.txt`. Fallback: per-stage cudaEvent timings.
+- [x] PR with the table, merge.
 
 ### M5 to M7
 As written in the brief; expanded here when M4 is merged.
@@ -145,3 +145,15 @@ As written in the brief; expanded here when M4 is merged.
 - **Two files beyond the brief's layout:** `include/gpu_pointcloud/detail/voxel_math.hpp` (per-point classification shared by the CPU code and the CUDA kernel, so both run identical arithmetic) and `test/filter_cases.hpp` (the edge-case suite, instantiated once per backend).
 - **compute-sanitizer not run (M3).** The tool cannot attach to the GPU under WSL2 without an administrator registry change on Windows ("Failed to initialize WDDM debugger interface", "Device not supported"). The M3 requirement "sanitizer clean" is not met; tracked in issue #3. Details in `docs/DESIGN.md`.
 - **`FilterStats::device_ms` added (M3)** so the benchmark can report GPU-only time without a second code path.
+- **nsys captures no GPU kernel data under WSL2 (M4).** NVTX ranges and CUDA API calls are recorded; kernel and memory rows are not. Per-stage cost is therefore measured with cudaEvents (`results/stages.csv`), as the brief's fallback allows. `results/nsys_summary.txt` is still committed, with host-side durations only.
+- **Extra M4 outputs:** `results/stages.csv` and `results/bench.md` (the benchmark's stdout), and `Filter::last_stage_times()`.
+
+## Owner tasks
+
+- Open `results/profile.nsys-rep` in Nsight Systems on Windows and save `results/nsys_timeline.png` (issue #6). The file is not committed; regenerate it with `scripts/profile.sh` if needed.
+- Enable the NVIDIA debugger interface or use a native Linux machine to run compute-sanitizer (issue #3).
+- Read the README before the v0.1.0 release.
+
+## Next session
+
+M5 to M7 are not started. Start with M5 using the Zenoh config recorded under M0. `cloud_publisher_node` already exists; it still needs the latency listener, a `compose.net.yml` and `scripts/net_bench.sh`.
