@@ -13,6 +13,7 @@ It comes with benchmarks of the bare filter and of the running node, measured on
 - **Profiled, changed, measured again:** the host-to-device copy was the largest CUDA stage. Removing a staging copy cut the 1280x720 end-to-end time from 2.356 to 1.641 ms. ([stages.csv](results/stages.csv), [history](results/history))
 - **The GPU's power management decides the result at camera rates:** after 100 ms of idle a 1280x720 CUDA call takes 6.96 ms instead of 1.49 ms. ([idle_gap.csv](results/idle_gap.csv))
 - **In a tight loop CUDA beats the best CPU baseline (OpenMP, 20 threads) only at larger clouds:** 0.59x at 320x240, 1.30x at 640x480, 1.76x at 1280x720, end to end. ([bench.csv](results/bench.csv))
+- **Throughput at 1280x720 (921,600 points):** CUDA filters 561 million input points/s end to end (2.12 billion/s GPU-only), against 64.7 million/s for single-threaded `pcl::VoxelGrid` (8.68x) and 319 million/s for OpenMP on 20 threads. ([bench.csv](results/bench.csv))
 - **Across containers, Fast DDS with defaults dropped 37.4% of 3.7 MB clouds at 10 Hz; Zenoh dropped none** (p50 4.28 ms). Fast DDS's `LARGE_DATA` mode also delivered everything (p50 4.15 ms). Single host, Docker bridge network. ([net.csv](results/net.csv))
 - **Parity:** every backend returns the same voxel count; centroids agree within 1e-4 m per axis (tested), and were identical on every tested cloud.
 
@@ -209,6 +210,14 @@ All backends, median ms (99th percentile in brackets):
 | 1280x720 | 26.156 (29.344) | 14.242 (17.667) | 2.889 (12.901) | 1.641 (1.917) | 0.435 (0.547) | 39,514 |
 
 Against the single-threaded baselines CUDA end-to-end is 4.56x / 12.38x / 15.93x faster than `cpu` and 3.86x / 7.11x / 8.68x faster than PCL. Those are the easy comparisons; the OpenMP one above is the fair one.
+
+Input throughput (input points / median time), million points per second:
+
+| Resolution | cpu | pcl | cpu_omp | cuda end-to-end | cuda GPU-only |
+|---|---:|---:|---:|---:|---:|
+| 320x240 | 40.5 | 47.9 | 313 | 185 | 352 |
+| 640x480 | 35.2 | 61.3 | 336 | 436 | 1,199 |
+| 1280x720 | 35.2 | 64.7 | 319 | 561 | 2,120 |
 
 - **cpu**: single-threaded reference: key every point, `std::sort`, linear reduce, `-O3`.
 - **cpu_omp**: the same algorithm on OpenMP (parallel classify, sort and reduce), bit-identical output to `cpu`. 20 threads was the fastest setting at every resolution in the thread sweep ([results/cpu_omp_threads.csv](results/cpu_omp_threads.csv)).
