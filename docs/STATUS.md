@@ -12,8 +12,8 @@
 |---|---|---|---|
 | M0 zenoh smoke test | done | n/a | Passed, see below |
 | M1 skeleton + CI | done | [#1](https://github.com/Arsh624/ros2-gpu-pointcloud/pull/1) | CI on main: https://github.com/Arsh624/ros2-gpu-pointcloud/actions/runs/44019966683 |
-| M2 CPU filter | in review | | 24 tests pass, node verified with backend cpu |
-| M3 CUDA filter | pending | | |
+| M2 CPU filter | done | [#2](https://github.com/Arsh624/ros2-gpu-pointcloud/pull/2) | 24 tests pass, node verified with backend cpu |
+| M3 CUDA filter | in review | | Parity exact on RTX 4070; compute-sanitizer could not run under WSL2 (see cuts) |
 | M4 benchmark + profile | pending | | |
 | M5 networking | pending | | |
 | M6 README + polish | pending | | |
@@ -123,10 +123,10 @@ ZENOH_CONFIG_OVERRIDE='connect/endpoints=["tcp/router:7447"];listen/endpoints=["
 - [x] PR with output, merge.
 
 ### M3: CUDA filter (branch `m3-cuda-filter`)
-- [ ] `test/test_parity_cuda.cpp` first: 3 resolutions x voxel sizes {0.02, 0.05, 0.1}, equal count and max |delta| <= 1e-4; the M2 edge cases through CUDA; reserve-growth case; `GTEST_SKIP` when `cuda_device_present()` is false.
-- [ ] `src/filter_cuda.cu`: key + flag kernel, `DeviceSelect::Flagged`, `DeviceRadixSort::SortPairs`, `DeviceReduce::ReduceByKey`, divide kernel; preallocated device buffers and CUB temp storage, pinned host buffers, one stream.
+- [x] `test/test_parity_cuda.cpp` first: 3 resolutions x voxel sizes {0.02, 0.05, 0.1}, equal count and max |delta| <= 1e-4; the M2 edge cases through CUDA; reserve-growth case; `GTEST_SKIP` when `cuda_device_present()` is false.
+- [x] `src/filter_cuda.cu`: key + flag kernel, `DeviceSelect::Flagged`, `DeviceRadixSort::SortPairs`, `DeviceReduce::ReduceByKey`, divide kernel; preallocated device buffers and CUB temp storage, pinned host buffers, one stream.
 - [ ] `compute-sanitizer` on the 640x480 case: 0 errors.
-- [ ] Node verified with `backend:=cuda`. PR, merge.
+- [x] Node verified with `backend:=cuda`. PR, merge.
 
 ### M4: benchmark + profile (branch `m4-benchmark`)
 - [ ] `bench/bench_filter.cpp`: flags `--backend`, `--res`, `--iters`, `--warmup`, `--csv`; 20 warmup + 200 timed; CUDA end-to-end and GPU-only timings; NVTX ranges per stage.
@@ -143,3 +143,5 @@ As written in the brief; expanded here when M4 is merged.
 
 - **`cloud_publisher_node` arrived in M2, not M5.** M2 needs a one-shot publisher of the synthetic cloud to verify the filter node, so the basic publisher was written now. M5 adds the latency listener and any rate or QoS options it needs.
 - **Two files beyond the brief's layout:** `include/gpu_pointcloud/detail/voxel_math.hpp` (per-point classification shared by the CPU code and the CUDA kernel, so both run identical arithmetic) and `test/filter_cases.hpp` (the edge-case suite, instantiated once per backend).
+- **compute-sanitizer not run (M3).** The tool cannot attach to the GPU under WSL2 without an administrator registry change on Windows ("Failed to initialize WDDM debugger interface", "Device not supported"). The M3 requirement "sanitizer clean" is not met; tracked in issue #3. Details in `docs/DESIGN.md`.
+- **`FilterStats::device_ms` added (M3)** so the benchmark can report GPU-only time without a second code path.

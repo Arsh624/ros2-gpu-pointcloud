@@ -39,3 +39,4 @@ Tests and the benchmark link only this library, so they run without a ROS graph.
 | `test/filter_cases.hpp` | Backend-independent filter cases (gtest value-parameterized), instantiated per backend |
 | `test/test_filter_cpu.cpp` | The cases on the CPU backend, voxel key packing, synthetic scene determinism |
 | `test/test_cloud_conv.cpp` | PointCloud2 conversion, including clouds it must reject |
+| `test/test_parity_cuda.cpp` | The cases on the CUDA backend and CPU-vs-CUDA parity; skipped without a GPU |
