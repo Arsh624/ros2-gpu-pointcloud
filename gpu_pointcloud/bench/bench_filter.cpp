@@ -1,21 +1,28 @@
-// bench_filter: times the CPU and CUDA filters on the synthetic clouds. No ROS.
+// bench_filter: times the filter backends on the synthetic clouds. No ROS.
 //
-//   bench_filter [--backend cpu|cuda|all] [--res WxH|all] [--iters N] [--warmup N] [--csv FILE]
-//                [--stages-csv FILE]
+//   bench_filter [--backend LIST|all] [--res WxH|all] [--iters N] [--warmup N] [--threads N]
+//                [--csv FILE] [--stages-csv FILE]
 //
-// Timings reported per resolution:
-//   cpu  / end_to_end : steady_clock around Filter::apply
-//   cuda / end_to_end : steady_clock around Filter::apply, i.e. host input to host output,
-//                       including both copies and the final stream synchronisation
-//   cuda / gpu_only   : cudaEvent time of the device pipeline (FilterStats::device_ms),
-//                       excluding the input and output copies
+// LIST is a comma-separated subset of: cpu, cpu_omp, pcl, cuda.
+//
+// Backends and what their timing covers:
+//   cpu     / end_to_end : single-threaded reference; steady_clock around Filter::apply
+//   cpu_omp / end_to_end : OpenMP backend with --threads threads (default: all); same clock
+//   pcl     / end_to_end : radial range loop + pcl::VoxelGrid on a ready pcl::PointCloud; the
+//                          conversions into and out of PCL types are NOT timed (WITH_PCL builds)
+//   cuda    / end_to_end : host input to host output, including both copies and the final
+//                          stream synchronisation; steady_clock around Filter::apply
+//   cuda    / gpu_only   : cudaEvent time of the device pipeline (FilterStats::device_ms),
+//                          excluding the input and output copies
 #include <algorithm>
 #include <chrono>
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
 #include <fstream>
+#include <functional>
 #include <memory>
+#include <sstream>
 #include <stdexcept>
 #include <string>
 #include <utility>
@@ -23,16 +30,20 @@
 
 #include "gpu_pointcloud/filter.hpp"
 #include "gpu_pointcloud/synthetic.hpp"
+#ifdef GPU_POINTCLOUD_WITH_PCL
+#include "pcl_baseline.hpp"
+#endif
 
 using namespace gpu_pointcloud;
 
 namespace {
 
 struct Options {
-  std::string backend = "all";
+  std::vector<std::string> backends;
   std::string res = "all";
   int iters = 200;
   int warmup = 20;
+  int threads = 0;
   std::string csv;
   std::string stages_csv;
 };
@@ -45,28 +56,73 @@ struct Row {
   std::size_t out_points;
 };
 
-[[noreturn]] void usage(const char* error) {
-  std::fprintf(stderr, "error: %s\nusage: bench_filter [--backend cpu|cuda|all] [--res WxH|all] [--iters N] "
-                       "[--warmup N] [--csv FILE] [--stages-csv FILE]\n", error);
+struct StageRow {
+  std::string resolution, stage;
+  double median_ms;
+};
+
+// One backend prepared for one cloud. `step` is the timed work.
+struct Runner {
+  std::function<FilterStats()> step;
+  std::function<std::vector<StageTime>()> stages = [] { return std::vector<StageTime>{}; };
+  bool has_device_time = false;
+};
+
+const char* const kUsage =
+    "usage: bench_filter [--backend LIST|all] [--res WxH|all] [--iters N] [--warmup N] [--threads N]\n"
+    "                    [--csv FILE] [--stages-csv FILE]\n"
+    "       LIST is a comma-separated subset of: cpu, cpu_omp, pcl, cuda\n";
+
+[[noreturn]] void usage(const std::string& error) {
+  std::fprintf(stderr, "error: %s\n%s", error.c_str(), kUsage);
   std::exit(2);
+}
+
+bool pcl_compiled() {
+#ifdef GPU_POINTCLOUD_WITH_PCL
+  return true;
+#else
+  return false;
+#endif
 }
 
 Options parse(int argc, char** argv) {
   Options o;
+  std::string backend = "all";
   for (int i = 1; i < argc; ++i) {
     const std::string a = argv[i];
-    if (i + 1 >= argc) usage(("missing value for " + a).c_str());
+    if (i + 1 >= argc) usage("missing value for " + a);
     const std::string v = argv[++i];
-    if (a == "--backend") o.backend = v;
+    if (a == "--backend") backend = v;
     else if (a == "--res") o.res = v;
     else if (a == "--iters") o.iters = std::atoi(v.c_str());
     else if (a == "--warmup") o.warmup = std::atoi(v.c_str());
+    else if (a == "--threads") o.threads = std::atoi(v.c_str());
     else if (a == "--csv") o.csv = v;
     else if (a == "--stages-csv") o.stages_csv = v;
-    else usage(("unknown option " + a).c_str());
+    else usage("unknown option " + a);
   }
-  if (o.backend != "cpu" && o.backend != "cuda" && o.backend != "all") usage("--backend must be cpu, cuda or all");
-  if (o.iters < 1 || o.warmup < 0) usage("--iters must be >= 1 and --warmup >= 0");
+  if (o.iters < 1 || o.warmup < 0 || o.threads < 0) usage("--iters must be >= 1, --warmup and --threads >= 0");
+
+  if (backend == "all") {
+    // Everything this build and machine can run; unavailable backends are skipped with a note.
+    o.backends = {"cpu", "cpu_omp"};
+    if (pcl_compiled()) o.backends.push_back("pcl");
+    else std::fprintf(stderr, "note: built without PCL (WITH_PCL=OFF), skipping the pcl baseline\n");
+    if (cuda_device_present()) o.backends.push_back("cuda");
+    else std::fprintf(stderr, "note: no CUDA device available, skipping the cuda backend\n");
+  } else {
+    std::stringstream list(backend);
+    for (std::string name; std::getline(list, name, ',');) {
+      if (name != "cpu" && name != "cpu_omp" && name != "pcl" && name != "cuda") usage("unknown backend " + name);
+      if (name == "pcl" && !pcl_compiled()) usage("this build has no PCL support (configure with -DWITH_PCL=ON)");
+      if (name == "cuda" && !cuda_device_present()) {
+        usage(cuda_compiled() ? "no CUDA device is visible" : "this build has no CUDA support");
+      }
+      o.backends.push_back(name);
+    }
+    if (o.backends.empty()) usage("--backend list is empty");
+  }
   return o;
 }
 
@@ -90,94 +146,101 @@ double p99(std::vector<double> v) {
   return v[std::max<std::size_t>(rank, 1) - 1];
 }
 
-Row make_row(const std::string& res, std::size_t points, const char* backend, const char* timing,
+Row make_row(const std::string& res, std::size_t points, const std::string& backend, const char* timing,
              const std::vector<double>& ms, std::size_t out_points) {
   const double med = median(ms);
   return {res, points, backend, timing, med, p99(ms), static_cast<double>(points) / (med * 1e-3), out_points};
-}
-
-// Runs warmup + timed iterations. `wall_ms` gets one steady_clock sample per timed iteration and
-// `device_ms` the matching FilterStats::device_ms.
-std::size_t run(Filter& filter, const std::vector<PointXYZ>& cloud, const Options& o, std::vector<double>& wall_ms,
-                std::vector<std::vector<double>>& stage_ms,
-                std::vector<double>& device_ms) {
-  std::vector<PointXYZ> out;
-  for (int i = 0; i < o.warmup; ++i) filter.apply(cloud.data(), cloud.size(), out);
-  wall_ms.clear();
-  device_ms.clear();
-  stage_ms.clear();
-  for (int i = 0; i < o.iters; ++i) {
-    const auto t0 = std::chrono::steady_clock::now();
-    const FilterStats s = filter.apply(cloud.data(), cloud.size(), out);
-    const auto t1 = std::chrono::steady_clock::now();
-    wall_ms.push_back(std::chrono::duration<double, std::milli>(t1 - t0).count());
-    device_ms.push_back(s.device_ms);
-    const auto stages = filter.last_stage_times();
-    stage_ms.resize(stages.size());
-    for (std::size_t k = 0; k < stages.size(); ++k) stage_ms[k].push_back(stages[k].ms);
-  }
-  return out.size();
 }
 
 }  // namespace
 
 int main(int argc, char** argv) {
   const Options o = parse(argc, argv);
-  const bool want_cpu = o.backend != "cuda";
-  bool want_cuda = o.backend != "cpu";
-  if (want_cuda && !cuda_device_present()) {
-    if (o.backend == "cuda") {
-      std::fprintf(stderr, "error: --backend cuda requested but %s\n",
-                   cuda_compiled() ? "no CUDA device is visible" : "this build has no CUDA support");
-      return 1;
-    }
-    std::fprintf(stderr, "note: no CUDA device available, benchmarking the CPU backend only\n");
-    want_cuda = false;
-  }
-
   const FilterParams params;  // defaults: voxel 0.05 m, range 0.3 to 10 m
+  const int threads = o.threads > 0 ? o.threads : default_cpu_threads();
+
   std::vector<Row> rows;
-  std::vector<std::string> speedups;
-  struct StageRow {
-    std::string resolution, stage;
-    double median_ms;
-  };
   std::vector<StageRow> stage_rows;
+  std::vector<std::string> speedups;
 
   for (const auto& [w, h] : resolutions(o.res)) {
     const std::string res = std::to_string(w) + "x" + std::to_string(h);
     const auto cloud = make_synthetic_cloud(w, h);
-    std::vector<double> wall, device;
-    std::vector<std::vector<double>> stage;
-    double cpu_median = 0.0;
+    double cpu_median = 0.0, best_cpu_median = 0.0, cuda_e2e = 0.0, cuda_gpu = 0.0;
+    std::string best_cpu;
 
-    if (want_cpu) {
-      auto filter = make_cpu_filter(params);
-      const std::size_t out = run(*filter, cloud, o, wall, stage, device);
-      rows.push_back(make_row(res, cloud.size(), "cpu", "end_to_end", wall, out));
-      cpu_median = rows.back().median_ms;
+    for (const std::string& backend : o.backends) {
+      // Everything a runner needs stays alive in these until the backend is done.
+      std::unique_ptr<Filter> filter;
+      std::vector<PointXYZ> out;
+      Runner runner;
+#ifdef GPU_POINTCLOUD_WITH_PCL
+      std::unique_ptr<bench::PclBaseline> pcl;
+      if (backend == "pcl") {
+        pcl = std::make_unique<bench::PclBaseline>(params);
+        pcl->set_input(cloud.data(), cloud.size());
+        runner.step = [&] { return pcl->run(); };
+      }
+#endif
+      if (backend != "pcl") {
+        if (backend == "cpu") filter = make_cpu_filter(params);
+        else if (backend == "cpu_omp") filter = make_cpu_omp_filter(params, threads);
+        else filter = make_cuda_filter(params, cloud.size());
+        runner.step = [&] { return filter->apply(cloud.data(), cloud.size(), out); };
+        runner.stages = [&] { return filter->last_stage_times(); };
+        runner.has_device_time = backend == "cuda";
+      }
+
+      for (int i = 0; i < o.warmup; ++i) runner.step();
+      std::vector<double> wall, device;
+      std::vector<std::vector<double>> stage;
+      std::size_t out_points = 0;
+      for (int i = 0; i < o.iters; ++i) {
+        const auto t0 = std::chrono::steady_clock::now();
+        const FilterStats s = runner.step();
+        const auto t1 = std::chrono::steady_clock::now();
+        wall.push_back(std::chrono::duration<double, std::milli>(t1 - t0).count());
+        device.push_back(s.device_ms);
+        out_points = s.out;
+        const auto stages = runner.stages();
+        stage.resize(stages.size());
+        for (std::size_t k = 0; k < stages.size(); ++k) stage[k].push_back(stages[k].ms);
+      }
+
+      rows.push_back(make_row(res, cloud.size(), backend, "end_to_end", wall, out_points));
+      const double med = rows.back().median_ms;
+      if (backend == "cuda") {
+        cuda_e2e = med;
+        rows.push_back(make_row(res, cloud.size(), backend, "gpu_only", device, out_points));
+        cuda_gpu = rows.back().median_ms;
+        const auto names = runner.stages();
+        for (std::size_t k = 0; k < names.size() && k < stage.size(); ++k) {
+          stage_rows.push_back({res, names[k].name, median(stage[k])});
+        }
+      } else {
+        if (backend == "cpu") cpu_median = med;
+        if (best_cpu.empty() || med < best_cpu_median) {
+          best_cpu = backend;
+          best_cpu_median = med;
+        }
+      }
     }
-    if (want_cuda) {
-      auto filter = make_cuda_filter(params, cloud.size());
-      const std::size_t out = run(*filter, cloud, o, wall, stage, device);
-      rows.push_back(make_row(res, cloud.size(), "cuda", "end_to_end", wall, out));
-      const double e2e = rows.back().median_ms;
-      rows.push_back(make_row(res, cloud.size(), "cuda", "gpu_only", device, out));
-      const double gpu = rows.back().median_ms;
-      if (want_cpu) {
-        char line[160];
-        std::snprintf(line, sizeof(line), "| %s | %.2fx | %.2fx |", res.c_str(), cpu_median / e2e, cpu_median / gpu);
-        speedups.push_back(line);
+
+    if (cuda_e2e > 0.0 && !best_cpu.empty()) {
+      char line[256];
+      char single[2][32] = {"n/a", "n/a"};
+      if (cpu_median > 0.0) {
+        std::snprintf(single[0], sizeof(single[0]), "%.2fx", cpu_median / cuda_e2e);
+        std::snprintf(single[1], sizeof(single[1]), "%.2fx", cpu_median / cuda_gpu);
       }
-      const auto names = filter->last_stage_times();
-      for (std::size_t k = 0; k < names.size() && k < stage.size(); ++k) {
-        stage_rows.push_back({res, names[k].name, median(stage[k])});
-      }
+      std::snprintf(line, sizeof(line), "| %s | %s | %.3f | %.2fx | %.2fx | %s | %s |", res.c_str(), best_cpu.c_str(),
+                    best_cpu_median, best_cpu_median / cuda_e2e, best_cpu_median / cuda_gpu, single[0], single[1]);
+      speedups.push_back(line);
     }
   }
 
-  std::printf("iterations: %d timed after %d warmup, voxel_size=%.2f m, range %.1f to %.1f m\n\n", o.iters, o.warmup,
-              params.voxel_size, params.min_range, params.max_range);
+  std::printf("iterations: %d timed after %d warmup, voxel_size=%.2f m, range %.1f to %.1f m, cpu_omp threads: %d\n\n",
+              o.iters, o.warmup, params.voxel_size, params.min_range, params.max_range, threads);
   std::printf("| resolution | points | backend | timing | median ms | p99 ms | input points/s | output points |\n");
   std::printf("|---|---:|---|---|---:|---:|---:|---:|\n");
   for (const Row& r : rows) {
@@ -185,9 +248,19 @@ int main(int argc, char** argv) {
                 r.backend.c_str(), r.timing.c_str(), r.median_ms, r.p99_ms, r.points_per_sec, r.out_points);
   }
   if (!speedups.empty()) {
-    std::printf("\nSpeedup = CPU median / CUDA median.\n\n");
-    std::printf("| resolution | vs CUDA end_to_end | vs CUDA gpu_only |\n|---|---:|---:|\n");
+    std::printf("\nSpeedup = CPU median / CUDA median. \"Best CPU\" is the fastest CPU baseline measured in this "
+                "run at that resolution.\n\n");
+    std::printf("| resolution | best CPU | best CPU ms | CUDA end_to_end vs best CPU | CUDA gpu_only vs best CPU "
+                "| CUDA end_to_end vs single-threaded cpu | CUDA gpu_only vs single-threaded cpu |\n");
+    std::printf("|---|---|---:|---:|---:|---:|---:|\n");
     for (const auto& s : speedups) std::printf("%s\n", s.c_str());
+  }
+  if (!stage_rows.empty()) {
+    std::printf("\nCUDA stages, median ms per stage (cudaEvent intervals on the stream).\n\n");
+    std::printf("| resolution | stage | median ms |\n|---|---|---:|\n");
+    for (const StageRow& r : stage_rows) {
+      std::printf("| %s | %s | %.3f |\n", r.resolution.c_str(), r.stage.c_str(), r.median_ms);
+    }
   }
 
   if (!o.csv.empty()) {
@@ -202,14 +275,6 @@ int main(int argc, char** argv) {
       std::snprintf(line, sizeof(line), "%s,%zu,%s,%s,%.4f,%.4f,%.0f,%zu\n", r.resolution.c_str(), r.points,
                     r.backend.c_str(), r.timing.c_str(), r.median_ms, r.p99_ms, r.points_per_sec, r.out_points);
       csv << line;
-    }
-  }
-
-  if (!stage_rows.empty()) {
-    std::printf("\nCUDA stages, median ms per stage (cudaEvent intervals on the stream).\n\n");
-    std::printf("| resolution | stage | median ms |\n|---|---|---:|\n");
-    for (const StageRow& r : stage_rows) {
-      std::printf("| %s | %s | %.3f |\n", r.resolution.c_str(), r.stage.c_str(), r.median_ms);
     }
   }
   if (!o.stages_csv.empty()) {
