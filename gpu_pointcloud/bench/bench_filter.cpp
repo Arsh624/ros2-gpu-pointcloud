@@ -2,7 +2,11 @@
 //
 //   bench_filter [--backend LIST|all] [--res WxH|all] [--iters N] [--warmup N] [--threads N]
 //                [--point-step BYTES] [--cuda-input auto|raw|repack] [--csv FILE] [--stages-csv FILE]
-//                [--samples-csv FILE] [--warmup-ms MS]
+//                [--samples-csv FILE] [--warmup-ms MS] [--dump PREFIX]
+//
+// --dump writes the input cloud to PREFIX_<res>_input.xyz and each backend's output to
+// PREFIX_<res>_<backend>.xyz (raw float32 x, y, z per point; not for pcl). Used by
+// scripts/plot_before_after.py.
 //
 // --warmup-ms keeps warming up until that much time has passed as well as --warmup iterations.
 // A GPU that sat idle while the CPU backends ran needs about a quarter of a second of work to
@@ -63,6 +67,7 @@ struct Options {
   std::string csv;
   std::string stages_csv;
   std::string samples_csv;
+  std::string dump;
 };
 
 struct Row {
@@ -88,7 +93,7 @@ struct Runner {
 const char* const kUsage =
     "usage: bench_filter [--backend LIST|all] [--res WxH|all] [--iters N] [--warmup N] [--threads N]\n"
     "                    [--point-step BYTES] [--cuda-input auto|raw|repack] [--csv FILE] [--stages-csv FILE]\n"
-    "                    [--samples-csv FILE] [--warmup-ms MS]\n"
+    "                    [--samples-csv FILE] [--warmup-ms MS] [--dump PREFIX]\n"
     "       LIST is a comma-separated subset of: cpu, cpu_omp, pcl, cuda\n";
 
 [[noreturn]] void usage(const std::string& error) {
@@ -128,6 +133,7 @@ Options parse(int argc, char** argv) {
     else if (a == "--csv") o.csv = v;
     else if (a == "--stages-csv") o.stages_csv = v;
     else if (a == "--samples-csv") o.samples_csv = v;
+    else if (a == "--dump") o.dump = v;
     else usage("unknown option " + a);
   }
   if (o.iters < 1 || o.warmup < 0 || o.threads < 0) usage("--iters must be >= 1, --warmup and --threads >= 0");
@@ -181,6 +187,16 @@ Row make_row(const std::string& res, std::size_t points, const std::string& back
   return {res, points, backend, timing, med, p99(ms), static_cast<double>(points) / (med * 1e-3), out_points};
 }
 
+// Raw float32 x, y, z per point, for the plot script.
+void write_xyz(const std::string& path, const PointXYZ* pts, std::size_t n) {
+  std::FILE* f = std::fopen(path.c_str(), "wb");
+  if (!f || std::fwrite(pts, sizeof(PointXYZ), n, f) != n) {
+    std::fprintf(stderr, "error: cannot write %s\n", path.c_str());
+    std::exit(1);
+  }
+  std::fclose(f);
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
@@ -212,6 +228,7 @@ int main(int argc, char** argv) {
       for (std::size_t i = 0; i < cloud.size(); ++i) std::memcpy(&strided[i * o.point_step], &cloud[i], sizeof(PointXYZ));
       view = {strided.data(), cloud.size(), static_cast<std::size_t>(o.point_step), 0, 4, 8};
     }
+    if (!o.dump.empty()) write_xyz(o.dump + "_" + res + "_input.xyz", cloud.data(), cloud.size());
     double cpu_median = 0.0, best_cpu_median = 0.0, cuda_e2e = 0.0, cuda_gpu = 0.0;
     std::string best_cpu;
 
@@ -267,6 +284,9 @@ int main(int argc, char** argv) {
         }
       }
 
+      if (!o.dump.empty() && backend != "pcl") {
+        write_xyz(o.dump + "_" + res + "_" + backend + ".xyz", out.data(), out.size());
+      }
       rows.push_back(make_row(res, cloud.size(), backend, "end_to_end", wall, out_points));
       const double med = rows.back().median_ms;
       if (backend == "cuda") {

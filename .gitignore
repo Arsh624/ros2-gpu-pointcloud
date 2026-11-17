@@ -5,3 +5,4 @@ results/*.nsys-rep
 results/*.sqlite
 BRIEF.local.md
 .claude/
+build_tmp/

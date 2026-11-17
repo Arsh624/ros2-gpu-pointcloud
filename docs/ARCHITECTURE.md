@@ -20,8 +20,9 @@ Tests and the benchmark link only this library, so they run without a ROS graph.
 | File | Role |
 |---|---|
 | `include/gpu_pointcloud/cloud_conv.hpp`, `src/cloud_conv.cpp` | `sensor_msgs/PointCloud2` to and from `PointXYZ` |
-| `src/filter_node.cpp` | `pointcloud_filter_node`: subscribes `input`, publishes `output`, parameter `backend: cpu|cuda` |
-| `src/cloud_publisher_node.cpp` | `cloud_publisher_node`: publishes the synthetic cloud on `cloud` at a fixed rate |
+| `src/filter_node.cpp` | `pointcloud_filter_node`: subscribes `input`, publishes `output`; parameters `backend: cpu|cpu_omp|cuda`, `cpu_threads`, `voxel_size`, `min_range`, `max_range`, `latency_csv` (per-message timing and CPU log) |
+| `src/cloud_publisher_node.cpp` | `cloud_publisher_node`: publishes the synthetic cloud on `cloud` at a fixed rate; `point_step`, `count`, `wait_for_subscribers` |
+| `docker/fastdds_shm_large.xml` | Fast DDS shared-memory profile with a 16 MB segment, set in the dev container (see DESIGN.md, "Middleware for same-host node runs") |
 
 
 
@@ -56,5 +57,7 @@ Tests and the benchmark link only this library, so they run without a ROS graph.
 | `bench/bench_h2d.cu` | Bare host-to-device transfer time by source-buffer allocation method |
 | `scripts/bench.sh` | Runs the benchmarks under the 20 + 200 protocol and records the environment in `results/env.txt` |
 | `scripts/profile.sh` | Nsight Systems capture and `results/nsys_summary.txt` |
+| `scripts/node_bench.sh` | Runs the node against the publisher at 10 and 30 Hz per backend; writes `results/node_latency.csv` |
+| `scripts/plot_before_after.py` | Plots the files from `bench_filter --dump` into `results/before_after.png` (host Python with matplotlib) |
 
 `results/` holds the current run; `results/history/<name>/` holds earlier runs for before/after comparison.

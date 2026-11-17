@@ -2,69 +2,110 @@
 
 [![CI](https://github.com/Arsh624/ros2-gpu-pointcloud/actions/workflows/ci.yml/badge.svg)](https://github.com/Arsh624/ros2-gpu-pointcloud/actions/workflows/ci.yml)
 
-A ROS 2 Jazzy node that range-filters and voxel-downsamples point clouds. It has a single-threaded C++17 backend, an OpenMP backend and a CUDA backend that produce the same output, and a benchmark that compares them with each other and with PCL.
+A ROS 2 Jazzy node that range-filters and voxel-downsamples point clouds on the CPU (single-threaded or OpenMP) or on an NVIDIA GPU (CUDA + CUB), with the same output from every backend.
+It comes with benchmarks of the bare filter and of the running node, measured on one laptop, with every number in this file taken from a committed file in [results/](results).
 
-**Work in progress.** See [docs/STATUS.md](docs/STATUS.md) for what exists and what is next.
+![Input cloud and filtered output](results/before_after.png)
 
-## Benchmark
+## At a glance
 
-Default parameters (voxel 0.05 m, range 0.3 to 10 m), synthetic depth-camera cloud, packed xyz input (12 bytes per point). Each number is the median of 200 timed iterations after a warmup of 20 iterations and at least 500 ms. Raw data is in [results/](results).
+- **Inside the node at 1280x720 and 30 Hz, CUDA takes 3.48 ms per frame on 0.96 CPU cores; the fastest OpenMP setting takes 5.10 ms on 6.14 cores.** At 10 Hz the GPU clocks down between frames and CUDA rises to 11.07 ms. ([node_latency.csv](results/node_latency.csv))
+- **Profiled, changed, measured again:** the host-to-device copy was the largest CUDA stage. Removing a staging copy cut the 1280x720 end-to-end time from 2.356 to 1.641 ms. ([stages.csv](results/stages.csv), [history](results/history))
+- **The GPU's power management decides the result at camera rates:** after 100 ms of idle a 1280x720 CUDA call takes 6.96 ms instead of 1.49 ms. ([idle_gap.csv](results/idle_gap.csv))
+- **In a tight loop CUDA beats the best CPU baseline (OpenMP, 20 threads) only at larger clouds:** 0.59x at 320x240, 1.30x at 640x480, 1.76x at 1280x720, end to end. ([bench.csv](results/bench.csv))
+- **Parity:** every backend returns the same voxel count; centroids agree within 1e-4 m per axis (tested), and were identical on every tested cloud.
 
-Environment: NVIDIA GeForce RTX 4070 Laptop GPU (driver 616.64, CUDA 12.6), Intel Core i9-14900HX with 20 logical CPUs visible to the container, PCL 1.14.0, Docker on WSL2 (kernel 5.15.167.4), laptop on AC power.
+## How it works
 
-There are two different questions here and they have different answers:
+```mermaid
+flowchart LR
+  cam["depth camera or<br/>cloud_publisher_node"] -- "PointCloud2 /input<br/>(any point_step with float32 x, y, z)" --> view
+  subgraph node["pointcloud_filter_node"]
+    view["zero-copy PointCloud2 view"] --> pick{"backend"}
+    pick --> cpu["cpu<br/>1 thread"]
+    pick --> omp["cpu_omp<br/>OpenMP"]
+    pick --> cuda["cuda<br/>CUB pipeline"]
+  end
+  cpu --> out
+  omp --> out
+  cuda --> out
+  out["PointCloud2 /output<br/>dense xyz float32, same header"]
+```
 
-1. **Back to back**, how fast is each backend when it is called in a tight loop?
-2. **At a camera's frame rate**, how long does one call take when the backend sat idle since the last frame?
+Per point: drop non-finite points, keep `min_range <= |p| <= max_range`, compute the voxel `floor(coord / voxel_size)` per axis, and output one centroid per occupied voxel (summed in double), in ascending voxel-key order. Defaults: voxel 0.05 m, range 0.3 to 10 m.
 
-### 1. Back to back: CUDA against the best CPU baseline
+The CUDA backend runs one stream with buffers allocated once and reused every frame:
 
-The best CPU baseline at every resolution is this repository's OpenMP backend on 20 threads.
+```mermaid
+flowchart LR
+  h2d["H2D copy<br/>straight from the input buffer"] --> classify["classify kernel<br/>finite, range, voxel key"]
+  classify --> select["cub::DeviceSelect::Flagged<br/>indices of kept points"]
+  select --> gather["gather keys"]
+  gather --> sort["cub::DeviceRadixSort::SortPairs<br/>27-bit narrowed key"]
+  sort --> reduce["cub::DeviceReduce::ReduceByKey<br/>double x, y, z, count"]
+  reduce --> centroid["centroid kernel<br/>sum / count to float32"]
+  centroid --> d2h["D2H copy"]
+```
 
-| Resolution | Points | Best CPU (OpenMP, 20 threads) ms | CUDA end-to-end ms | CUDA GPU-only ms | End-to-end speedup | GPU-only speedup |
-|---|---:|---:|---:|---:|---:|---:|
-| 320x240 | 76,800 | 0.246 | 0.415 | 0.218 | 0.59x | 1.13x |
-| 640x480 | 307,200 | 0.914 | 0.705 | 0.256 | 1.30x | 3.57x |
-| 1280x720 | 921,600 | 2.889 | 1.641 | 0.435 | 1.76x | 6.64x |
+Design decisions and the measurements behind them are in [docs/DESIGN.md](docs/DESIGN.md); the code layout is in [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
 
-In a tight loop the GPU is slower than 20 CPU threads at 320x240, 1.3x faster at 640x480 and 1.8x faster at 1280x720, end to end.
+## Quick start
 
-**The CUDA end-to-end time also depends on the process launch.** The same binary run seven times gave these medians ([results/cuda_launches.csv](results/cuda_launches.csv)):
+Needs Docker with the NVIDIA container runtime and a CUDA GPU (the `cpu` and `cpu_omp` backends work without one). From the repository root (from Git Bash on Windows, run `export MSYS_NO_PATHCONV=1` first):
 
-| Resolution | Fastest launch ms | Median launch ms | Slowest launch ms | Speedup vs best CPU, slowest to fastest |
-|---|---:|---:|---:|---:|
-| 320x240 | 0.384 | 0.489 | 0.512 | 0.48x to 0.64x |
-| 640x480 | 0.704 | 0.733 | 1.122 | 0.81x to 1.30x |
-| 1280x720 | 1.504 | 1.666 | 2.423 | 1.19x to 1.92x |
+```bash
+docker compose -f docker/compose.dev.yml up -d --build
+```
 
-At 1280x720 four launches were between 1.50 and 1.67 ms and three were near 2.4 ms. The difference is in the host-to-device transfer stage, which takes about 0.93 ms or about 1.74 ms for the same 11 MB. Host memory speed, CPU core type, buffer allocation and the bare transfer call were each ruled out by measurement; it sits in the driver's transfer path under WSL2 and was not traced further ([docs/DESIGN.md](docs/DESIGN.md), "Two transfer rates").
+```bash
+docker exec gpc-dev /ros_entrypoint.sh bash -c 'cd /ws && colcon build --cmake-args -DWITH_PCL=ON && colcon test && colcon test-result --verbose'
+```
 
-### 2. At a frame rate: idle gaps change the picture
+Expect `81 tests, 0 errors, 0 failures, 1 skipped`. The skipped test checks the error path of a build without CUDA, so it only runs in such a build.
 
-A benchmark loop never lets the GPU rest. A camera does. `bench_idle_gap` sleeps before every call and times the call ([results/idle_gap.csv](results/idle_gap.csv)). Median ms per call:
+Run the node (backend `cpu`, `cpu_omp` or `cuda`), feed it the synthetic 640x480 cloud and print the output width, then stop it:
 
-| Idle gap before each call | cpu_omp 640x480 | cuda 640x480 | cpu_omp 1280x720 | cuda 1280x720 |
-|---|---:|---:|---:|---:|
-| none (tight loop) | 0.91 | 0.71 | 2.69 | 1.49 |
-| 10 ms | 1.20 | 1.28 | 2.98 | 2.11 |
-| 33 ms (30 Hz) | 1.37 | 1.94 | 3.21 | 3.03 |
-| 100 ms (10 Hz) | 1.72 | 1.95 | 4.71 | 6.96 |
-| 300 ms | 7.03 | 5.94 | 9.39 | 12.71 |
-| 1 s | 6.74 | 6.05 | 7.33 | 13.00 |
+```bash
+docker exec -d gpc-dev /ros_entrypoint.sh ros2 run gpu_pointcloud pointcloud_filter_node --ros-args -p backend:=cuda
+```
 
-Both backends slow down when they have been idle, and the GPU slows down more:
+```bash
+docker exec gpc-dev /ros_entrypoint.sh bash -c 'ros2 run gpu_pointcloud cloud_publisher_node --ros-args -r cloud:=input -p count:=50 & ros2 topic echo --once /output sensor_msgs/msg/PointCloud2 --field width'
+```
 
-- **At 30 Hz the two are about level** (CUDA 6% faster at 1280x720, 40% slower at 640x480).
-- **At 10 Hz the CPU is faster at both sizes** (1280x720: 4.7 ms against 7.0 ms).
-- After a long idle a 1280x720 CUDA call takes about 12.7 ms, eight times its tight-loop time.
+```bash
+docker exec gpc-dev pkill -INT -f pointcloud_filter_node
+```
 
-The cause on the GPU side is its power management. `nvidia-smi` reports the idle GPU in performance state P8 at 210 MHz core / 405 MHz memory clock and 2 W; under the benchmark it is in P0 at 2625 MHz / 7000 to 8200 MHz and 33 W. After 3 s of idle it takes roughly a quarter to a third of a second of continuous work before calls are back to full speed ([results/idle_recovery.csv](results/idle_recovery.csv)). A tiny GPU call every 2 ms in the background does not prevent this ([results/idle_gap_keepalive.csv](results/idle_gap_keepalive.csv)): the clocks follow load, not activity. The CPU side slows because the OpenMP worker threads go to sleep; its worst single calls after a gap reached 20 to 70 ms.
+All three backends print `34654`.
 
-So on this laptop, **the GPU backend only pays off when it is kept busy**: at high frame rates, with large clouds, or when several streams share it. For one 640x480 camera at 10 to 30 Hz the OpenMP backend is the better choice here. A desktop or embedded GPU with different power management may behave differently; that has not been measured.
+Benchmarks (each overwrites its files in `results/`; nothing else should run in the container meanwhile):
 
-### 3. Inside the ROS node: latency and CPU cost per frame
+```bash
+docker exec gpc-dev /ros_entrypoint.sh bash /ws/src/ros2-gpu-pointcloud/scripts/bench.sh
+```
 
-`scripts/node_bench.sh` runs `pointcloud_filter_node` against `cloud_publisher_node` in one container, at 10 and 30 Hz, and logs every callback ([results/node_latency.csv](results/node_latency.csv)). 100 messages at 10 Hz and 300 at 30 Hz per row, after 20 start-up messages; every message arrived. "Callback" is callback entry to the return of `publish()` (PointCloud2 view, filter, output message). "CPU" is the CPU time of the whole node process (all threads) during the callback.
+```bash
+docker exec gpc-dev /ros_entrypoint.sh bash /ws/src/ros2-gpu-pointcloud/scripts/node_bench.sh
+```
+
+The before/after plot (matplotlib on the host):
+
+```bash
+docker exec gpc-dev /ros_entrypoint.sh bash -c 'mkdir -p /ws/src/ros2-gpu-pointcloud/build_tmp && /ws/install/gpu_pointcloud/lib/gpu_pointcloud/bench_filter --backend cuda --res 320x240 --iters 1 --warmup 0 --dump /ws/src/ros2-gpu-pointcloud/build_tmp/cloud'
+```
+
+```bash
+python3 scripts/plot_before_after.py build_tmp/cloud_320x240_input.xyz build_tmp/cloud_320x240_cuda.xyz results/before_after.png
+```
+
+## Results
+
+Environment: NVIDIA GeForce RTX 4070 Laptop GPU (driver 616.64, CUDA 12.6), Intel Core i9-14900HX with 20 logical CPUs visible to the container, PCL 1.14.0, Fast DDS 2.14.7, Docker on WSL2 (kernel 5.15.167.4), laptop on AC power. Synthetic depth-camera clouds: 320x240 (76,800 points), 640x480 (307,200) and 1280x720 (921,600), packed xyz (12 bytes per point).
+
+### 1. Inside the ROS node: latency and CPU cost per frame
+
+`scripts/node_bench.sh` runs `pointcloud_filter_node` against `cloud_publisher_node` in one container at 10 and 30 Hz and logs every callback ([results/node_latency.csv](results/node_latency.csv)). 100 messages at 10 Hz and 300 at 30 Hz per row, after 20 start-up messages; every message arrived. "Callback" is callback entry to the return of `publish()` (PointCloud2 view, filter, output message). "CPU" is the CPU time of the whole node process (all threads) during the callback.
 
 | Backend | Resolution | 10 Hz callback p50 ms | 10 Hz p99 ms | 10 Hz CPU p50 ms | 10 Hz avg cores | 30 Hz callback p50 ms | 30 Hz p99 ms | 30 Hz CPU p50 ms | 30 Hz avg cores |
 |---|---|---:|---:|---:|---:|---:|---:|---:|---:|
@@ -83,47 +124,17 @@ So on this laptop, **the GPU backend only pays off when it is kept busy**: at hi
 
 "Avg cores" is total CPU time over total callback time for the row; the CPU p50 column is the median of single callbacks, so the two do not divide into each other exactly.
 
-What this shows:
-
-- **CUDA costs one core, OpenMP costs four to nine.** At 1280x720 and 30 Hz, CUDA takes 3.48 ms per frame on 0.96 cores; OpenMP on 12 threads takes 6.68 ms on 4.55 cores. CUDA's CPU time equals its wall time, which fits the host thread spinning while it waits for the GPU (the CUDA runtime's default wait policy); a blocking wait was not tried.
-- **At 30 Hz CUDA is the fastest at 1280x720** (3.48 ms against 5.10 ms for the best OpenMP setting). At 640x480 OpenMP on 20 threads has the lower median (1.84 against 2.50 ms); CUDA has the lowest p99 at 640x480 at both rates (7.13 and 6.99 ms).
-- **At 10 Hz the GPU's idle clock-down shows up again**: CUDA 1280x720 goes from 3.48 ms at 30 Hz to 11.07 ms at 10 Hz (section 2 explains why).
-- **OpenMP tails are long inside a node.** Its p99 is between 10 and 50 ms in 10 of its 12 rows. The cause was not isolated; without ROS, section 2 already showed single OpenMP calls of 20 to 70 ms after an idle gap.
+- **CUDA costs one core, OpenMP costs four to nine.** At 1280x720 and 30 Hz, CUDA takes 3.48 ms per frame on 0.96 cores; OpenMP on 12 threads takes 6.68 ms on 4.55 cores, on 20 threads 5.10 ms on 6.14 cores. CUDA's CPU time equals its wall time, which fits the host thread spinning while it waits for the GPU (the CUDA runtime's default wait policy); a blocking wait was not tried.
+- **At 30 Hz CUDA is the fastest at 1280x720.** At 640x480 OpenMP on 20 threads has the lower median (1.84 against 2.50 ms); CUDA has the lowest p99 at 640x480 at both rates (7.13 and 6.99 ms).
+- **At 10 Hz the GPU's idle clock-down shows up again**: CUDA 1280x720 goes from 3.48 ms at 30 Hz to 11.07 ms at 10 Hz (section 3).
+- **OpenMP tails are long inside a node.** Its p99 is between 10 and 50 ms in 10 of its 12 rows. The cause was not isolated; without ROS, section 3 shows single OpenMP calls of 20 to 70 ms after an idle gap.
 - The single-threaded `cpu` backend needs 27 ms of the 33 ms frame budget at 1280x720 and 30 Hz.
 
-**Middleware setting used here.** Transport is not what this measures, so both processes use Fast DDS over shared memory with a segment large enough for one cloud ([docker/fastdds_shm_large.xml](docker/fastdds_shm_large.xml)). With middleware defaults most clouds of 0.9 MB and more were dropped in this container: Fast DDS's default 512 KB shared-memory segment is smaller than one sample, and the UDP path is limited by the Docker VM's 208 KB socket buffer cap. Middleware behaviour with defaults across containers is the subject of the networking comparison.
+**Middleware setting used here.** Transport is not what this measures, so both processes use Fast DDS over shared memory with a segment large enough for one cloud ([docker/fastdds_shm_large.xml](docker/fastdds_shm_large.xml), set by `compose.dev.yml`). With middleware defaults most clouds of 0.9 MB and more were dropped in this container: Fast DDS's default 512 KB shared-memory segment is smaller than one sample, and the UDP path is limited by the Docker VM's 208 KB socket buffer cap ([docs/DESIGN.md](docs/DESIGN.md), "Middleware for same-host node runs").
 
-### All backends, back to back
+### 2. The input bottleneck: profiled, changed, measured again
 
-Median ms (99th percentile in brackets), from the main run:
-
-| Resolution | cpu (1 thread) | pcl (1 thread) | cpu_omp (20 threads) | cuda end-to-end | cuda GPU-only | Output points |
-|---|---:|---:|---:|---:|---:|---:|
-| 320x240 | 1.894 (2.174) | 1.603 (1.972) | 0.246 (0.490) | 0.415 (0.676) | 0.218 (0.376) | 20,785 |
-| 640x480 | 8.732 (12.042) | 5.011 (6.015) | 0.914 (1.583) | 0.705 (0.815) | 0.256 (0.339) | 34,654 |
-| 1280x720 | 26.156 (29.344) | 14.242 (17.667) | 2.889 (12.901) | 1.641 (1.917) | 0.435 (0.547) | 39,514 |
-
-CUDA end-to-end speedup against each single-threaded baseline:
-
-| Resolution | vs cpu (1 thread) | vs pcl (1 thread) |
-|---|---:|---:|
-| 320x240 | 4.56x | 3.86x |
-| 640x480 | 12.38x | 7.11x |
-| 1280x720 | 15.93x | 8.68x |
-
-How to read this:
-
-- **cpu** is the single-threaded reference: key every point, `std::sort`, linear reduce, `-O3`.
-- **cpu_omp** is the same algorithm on OpenMP (parallel classify, parallel sort, parallel reduce). Its output is bit-identical to `cpu`. 20 threads was the fastest setting at every resolution in the thread sweep.
-- **pcl** is a radial range loop followed by `pcl::VoxelGrid`, single-threaded. Converting into and out of PCL point types is not timed, which favours PCL. Its voxel counts equal ours on all nine tested cases; its centroids are float-accumulated and it is not bit-compatible (details in [docs/DESIGN.md](docs/DESIGN.md)).
-- **cuda end-to-end** is host input to host output: host-to-device transfer straight from the input buffer, device pipeline, transfer back, final synchronisation, timed with `std::chrono::steady_clock`.
-- **cuda GPU-only** is the device pipeline between the two transfers, timed with cudaEvents.
-- CPU and CUDA backends return the same voxel count and, on these synthetic clouds, identical centroids. The tested tolerance is 1e-4 m per axis.
-- The clouds are synthetic. Real sensor data will have a different ratio of input points to occupied voxels.
-
-### The input bottleneck: profiled, changed, measured again
-
-The first per-stage breakdown showed that getting the cloud onto the GPU cost more than everything the GPU then did with it: 1.62 ms of 2.36 ms at 1280x720. The input path at that point was a `memcpy` into a pinned staging buffer followed by one asynchronous transfer.
+The first per-stage breakdown (cudaEvents around every stage) showed that getting the cloud onto the GPU cost more than everything the GPU then did with it: 1.62 ms of 2.36 ms at 1280x720. The input path at that point was a `memcpy` into a pinned staging buffer followed by one asynchronous transfer.
 
 What the measurements showed ([docs/DESIGN.md](docs/DESIGN.md), "Input path"):
 
@@ -141,17 +152,64 @@ So every backend now takes a strided view of the caller's buffer (the layout of 
 | CUDA end-to-end after, main run, ms | 0.415 | 0.705 | 1.641 |
 | CUDA end-to-end after, median of 7 launches, ms | 0.489 | 0.733 | 1.666 |
 
-In the slower launch state the 1280x720 time (about 2.4 ms) is no better than before the change. The "before" numbers come from single launches whose state was not recorded, so the size of the improvement is only established for the faster state. The input transfer is still the largest stage (1.05 ms of 1.64 ms).
+In the slower launch state (below) the 1280x720 time, about 2.4 ms, is no better than before the change. The "before" numbers come from single launches whose state was not recorded, so the size of the improvement is only established for the faster state. The input transfer is still the largest stage (1.05 ms of 1.64 ms).
 
-### The p99 tail: explained
+**The CUDA end-to-end time also depends on the process launch.** The same binary run seven times gave these medians ([results/cuda_launches.csv](results/cuda_launches.csv)):
 
-Earlier runs showed a CUDA 99th percentile of 11 to 12 ms at 1280x720 against a 2.4 ms median. Per-iteration samples ([results/p99_tail_example.csv](results/p99_tail_example.csv)) show these were the first few timed iterations, each about 11.5 ms, after which every iteration was normal. The GPU had idled for several seconds while the CPU backends ran in the same process, and the 20 warmup iterations ended before it was back at full clock. It is the same effect as in section 2, not a recurring stall and not an allocation or synchronisation in the filter.
+| Resolution | Fastest launch ms | Median launch ms | Slowest launch ms | Speedup vs best CPU, slowest to fastest |
+|---|---:|---:|---:|---:|
+| 320x240 | 0.384 | 0.489 | 0.512 | 0.48x to 0.64x |
+| 640x480 | 0.704 | 0.733 | 1.122 | 0.81x to 1.30x |
+| 1280x720 | 1.504 | 1.666 | 2.423 | 1.19x to 1.92x |
 
-The benchmark now warms up for at least 500 ms as well as 20 iterations. Without that, 2 of 6 runs had slow timed iterations (13 and 8 of them); with it, 0 of 8 runs had any, and the CUDA p99 at 1280x720 is 1.9 ms.
+At 1280x720 four launches were between 1.50 and 1.67 ms and three were near 2.4 ms. The difference is in the host-to-device transfer, which takes about 0.93 ms or about 1.74 ms for the same 11 MB. Host memory speed, CPU core type, buffer allocation and the bare transfer call were each ruled out by measurement; the cause was not found ([docs/DESIGN.md](docs/DESIGN.md), "Two transfer rates").
 
-### History
+### 3. The idle GPU: why a frame rate changes the answer
 
-Earlier runs are kept in [results/history](results/history) so changes can be compared. CUDA end-to-end median ms:
+A benchmark loop never lets the GPU rest. A camera does. `bench_idle_gap` sleeps before every call and times the call ([results/idle_gap.csv](results/idle_gap.csv)). Median ms per call:
+
+| Idle gap before each call | cpu_omp 640x480 | cuda 640x480 | cpu_omp 1280x720 | cuda 1280x720 |
+|---|---:|---:|---:|---:|
+| none (tight loop) | 0.91 | 0.71 | 2.69 | 1.49 |
+| 10 ms | 1.20 | 1.28 | 2.98 | 2.11 |
+| 33 ms (30 Hz) | 1.37 | 1.94 | 3.21 | 3.03 |
+| 100 ms (10 Hz) | 1.72 | 1.95 | 4.71 | 6.96 |
+| 300 ms | 7.03 | 5.94 | 9.39 | 12.71 |
+| 1 s | 6.74 | 6.05 | 7.33 | 13.00 |
+
+The cause on the GPU side is its power management. `nvidia-smi` reports the idle GPU in performance state P8 at 210 MHz core / 405 MHz memory clock and 2 W; under the benchmark it is in P0 at 2625 MHz / 7000 to 8200 MHz and 33 W. After 3 s of idle it takes roughly a quarter to a third of a second of continuous work before calls are back to full speed ([results/idle_recovery.csv](results/idle_recovery.csv)). A tiny GPU call every 2 ms in the background does not prevent this ([results/idle_gap_keepalive.csv](results/idle_gap_keepalive.csv)): the clocks follow load, not activity. The CPU side slows because the OpenMP worker threads go to sleep; its worst single calls after a gap reached 20 to 70 ms.
+
+The same effect explained an earlier CUDA p99 of 11 to 12 ms at 1280x720: per-iteration samples ([results/p99_tail_example.csv](results/p99_tail_example.csv)) showed these were the first few timed iterations after the GPU had idled while the CPU backends ran. The benchmark now warms up for at least 500 ms; without that 2 of 6 runs had slow timed iterations, with it 0 of 8.
+
+So on this laptop **the GPU backend pays off when it is kept busy**: at high frame rates, with large clouds, or when several streams share it. A desktop or embedded GPU with different power management may behave differently; that has not been measured.
+
+### 4. Back to back: speedup against the best CPU baseline
+
+`bench_filter`, no ROS: median of 200 timed iterations after 20 warmup iterations and at least 500 ms ([results/bench.csv](results/bench.csv)). The best CPU baseline at every resolution is this repository's OpenMP backend on 20 threads.
+
+| Resolution | Best CPU (OpenMP, 20 threads) ms | CUDA end-to-end ms | CUDA GPU-only ms | End-to-end speedup | GPU-only speedup |
+|---|---:|---:|---:|---:|---:|
+| 320x240 | 0.246 | 0.415 | 0.218 | 0.59x | 1.13x |
+| 640x480 | 0.914 | 0.705 | 0.256 | 1.30x | 3.57x |
+| 1280x720 | 2.889 | 1.641 | 0.435 | 1.76x | 6.64x |
+
+All backends, median ms (99th percentile in brackets):
+
+| Resolution | cpu (1 thread) | pcl (1 thread) | cpu_omp (20 threads) | cuda end-to-end | cuda GPU-only | Output points |
+|---|---:|---:|---:|---:|---:|---:|
+| 320x240 | 1.894 (2.174) | 1.603 (1.972) | 0.246 (0.490) | 0.415 (0.676) | 0.218 (0.376) | 20,785 |
+| 640x480 | 8.732 (12.042) | 5.011 (6.015) | 0.914 (1.583) | 0.705 (0.815) | 0.256 (0.339) | 34,654 |
+| 1280x720 | 26.156 (29.344) | 14.242 (17.667) | 2.889 (12.901) | 1.641 (1.917) | 0.435 (0.547) | 39,514 |
+
+Against the single-threaded baselines CUDA end-to-end is 4.56x / 12.38x / 15.93x faster than `cpu` and 3.86x / 7.11x / 8.68x faster than PCL. Those are the easy comparisons; the OpenMP one above is the fair one.
+
+- **cpu**: single-threaded reference: key every point, `std::sort`, linear reduce, `-O3`.
+- **cpu_omp**: the same algorithm on OpenMP (parallel classify, sort and reduce), bit-identical output to `cpu`. 20 threads was the fastest setting at every resolution in the thread sweep ([results/cpu_omp_threads.csv](results/cpu_omp_threads.csv)).
+- **pcl**: a radial range loop followed by `pcl::VoxelGrid`, single-threaded. Converting into and out of PCL point types is not timed, which favours PCL. Its voxel counts equal ours on all nine tested cases; its centroids are float-accumulated and not bit-compatible.
+- **cuda end-to-end**: host input to host output, including both transfers and the final synchronisation, timed with `std::chrono::steady_clock`.
+- **cuda GPU-only**: the device pipeline between the two transfers, timed with cudaEvents.
+
+Earlier runs are kept in [results/history](results/history). CUDA end-to-end median ms:
 
 | Run | What changed | 320x240 | 640x480 | 1280x720 |
 |---|---|---:|---:|---:|
@@ -160,18 +218,32 @@ Earlier runs are kept in [results/history](results/history) so changes can be co
 | [b-input-path](results/history/b-input-path) | Direct upload of the input buffer, fields read on the device | 0.430 | 0.792 | 1.702 |
 | current | Warmup of at least 500 ms; no change to the CUDA code | 0.415 | 0.705 | 1.641 |
 
-The M4 run reported speedups of 3.96x, 7.55x and 10.53x. Those were against the single-threaded backend, the only baseline at the time, and in a tight loop.
+The first benchmark reported 3.96x, 7.55x and 10.53x. Those were against the single-threaded backend, the only baseline at the time, in a tight loop.
 
-### Reproduce
+### 5. Parity
 
-Inside the dev container:
+CPU, OpenMP and CUDA must return the same voxel count exactly and every centroid within **1e-4 m per axis**. `test_parity_cuda` checks this on all three resolutions with voxel sizes 0.02, 0.05 and 0.1 m, plus the edge cases (NaN and Inf, exact range boundaries, negative coordinates on voxel boundaries, index overflow, a cloud larger than the reserved buffers). The measured difference was 0 m on every tested cloud: both compilers have floating-point contraction disabled so voxel keys match bit for bit, and sums are in double.
 
-```
-docker compose -f docker/compose.dev.yml up -d --build
-docker exec gpc-dev /ros_entrypoint.sh bash -c 'cd /ws && colcon build --cmake-args -DWITH_PCL=ON && colcon test && colcon test-result --verbose'
-docker exec gpc-dev /ros_entrypoint.sh bash /ws/src/ros2-gpu-pointcloud/scripts/bench.sh
-```
+## Limitations
+
+- **Synthetic data only.** A real sensor will have a different ratio of input points to occupied voxels, and so different timings.
+- **One laptop GPU under WSL2.** RTX 4070 Laptop, Docker on WSL2; a desktop, embedded or native-Linux GPU may behave differently.
+- **The GPU slows down after idle**, so results at 10 Hz differ a lot from tight-loop results (section 3). Windows' "prefer maximum performance" GPU mode was not tried.
+- **Two host-to-device transfer rates per filter instance** (about 0.93 or 1.74 ms for 11 MB), cause unknown.
+- **compute-sanitizer was not run**: it cannot attach to the GPU under WSL2 without an administrator change on Windows ([#3](https://github.com/Arsh624/ros2-gpu-pointcloud/issues/3)).
+- **The Nsight Systems capture has no GPU kernel rows under WSL2**; per-stage times come from cudaEvents instead ([results/nsys_summary.txt](results/nsys_summary.txt) has host-side ranges only).
+- **The raw-versus-repack rule for wide points is provisional**: measured only for 16- and 32-byte points.
+- **The maximum sustainable input rate per backend was not measured** (`RATE_SWEEP=1 scripts/node_bench.sh` exists but was not run).
+- **Node results use a tuned middleware profile** (Fast DDS shared memory, 16 MB segment). With defaults, large clouds are mostly dropped in this container.
+- **The CUDA backend's host thread spins while waiting** (one full core per frame in the node); a blocking wait was not tried.
+- **The OpenMP backend's long tails inside the node were not explained.**
+- **The PCL baseline does not time its point-type conversions**, which favours PCL.
+- **Networking (Fast DDS against Zenoh across containers) is not measured yet**; when it is, it will be on one host over a Docker bridge network, not a real LAN.
 
 ## Tests and CI
 
-CI builds and tests the CPU paths and compiles the CUDA code. GitHub runners have no GPU, so the CUDA parity tests run only locally (they skip themselves when no GPU is visible). The PCL comparison test is built only with `-DWITH_PCL=ON`, which CI does not use.
+CI builds and tests the CPU paths in `ros:jazzy-ros-base` and compiles the CUDA core library in the CUDA devel image. GitHub runners have no GPU, so the CUDA parity tests run only locally (they skip themselves when no GPU is visible). The PCL comparison test is built only with `-DWITH_PCL=ON`, which CI does not use.
+
+## License
+
+MIT, see [LICENSE](LICENSE).
