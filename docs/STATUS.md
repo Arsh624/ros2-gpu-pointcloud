@@ -166,8 +166,8 @@ Priority changed after M4: strengthen the evidence before adding features. Items
 |---|---|---|---|
 | A. PCL and OpenMP CPU baselines (#8, #9) | done | [#13](https://github.com/Arsh624/ros2-gpu-pointcloud/pull/13) | Best CPU is OpenMP on 20 threads. CUDA end-to-end vs best CPU: 0.55x / 0.86x / 1.12x at 320x240 / 640x480 / 1280x720. GPU-only: 1.04x / 2.39x / 4.64x |
 | B. Fix the input copy bottleneck (#5) | done | [#14](https://github.com/Arsh624/ros2-gpu-pointcloud/pull/14) | CUDA end-to-end 0.442 / 0.998 / 2.356 ms -> 0.430 / 0.792 / 1.702 ms (main run); vs best CPU 0.57x / 1.11x / 1.63x. Over 7 launches 1280x720 is ~1.5 ms (5) or ~2.4 ms (2) |
-| C. Explain the CUDA p99 tail at 1280x720 | in review | | Environmental: GPU idles to P8 (210 MHz) during the CPU runs and needs ~250-320 ms to clock up; the tail was the first timed iterations. Benchmark warmup now also lasts 500 ms. With idle gaps CUDA 1280x720 is 3.0 ms at 30 Hz and 7.0 ms at 10 Hz (cpu_omp: 3.2 and 4.7 ms) |
-| D. Node-level latency and max sustainable rate | pending | | |
+| C. Explain the CUDA p99 tail at 1280x720 | done | [#15](https://github.com/Arsh624/ros2-gpu-pointcloud/pull/15) | Environmental: GPU idles to P8 (210 MHz) during the CPU runs and needs ~250-320 ms to clock up; the tail was the first timed iterations. Benchmark warmup now also lasts 500 ms. With idle gaps CUDA 1280x720 is 3.0 ms at 30 Hz and 7.0 ms at 10 Hz (cpu_omp: 3.2 and 4.7 ms) |
+| D. Node-level latency and max sustainable rate | in progress | | |
 | E. M5 Fast DDS vs Zenoh (#10) | pending | | |
 | F. M6 README rewrite (#11), M7 release (#12) | pending | | |
 

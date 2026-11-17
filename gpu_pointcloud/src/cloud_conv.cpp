@@ -68,6 +68,8 @@ void from_pointcloud2(const PointCloud2& msg, std::vector<PointXYZ>& out) {
   }
 }
 
+bool pointcloud2_view(const PointCloud2&, CloudView&) { return false; }  // tests first
+
 void to_pointcloud2(const PointXYZ* points, std::size_t n, const std_msgs::msg::Header& header, PointCloud2& out) {
   out.header = header;
   out.height = 1;
