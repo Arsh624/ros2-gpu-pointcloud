@@ -2,6 +2,14 @@
 //
 //   bench_filter [--backend LIST|all] [--res WxH|all] [--iters N] [--warmup N] [--threads N]
 //                [--point-step BYTES] [--cuda-input auto|raw|repack] [--csv FILE] [--stages-csv FILE]
+//                [--samples-csv FILE] [--warmup-ms MS]
+//
+// --warmup-ms keeps warming up until that much time has passed as well as --warmup iterations.
+// A GPU that sat idle while the CPU backends ran needs about a quarter of a second of work to
+// clock back up, which 20 iterations do not always cover (docs/DESIGN.md, "Idle GPU").
+//
+// --samples-csv writes every timed iteration (wall ms, and for cuda the device ms and the
+// slowest stage), for looking at outliers rather than medians.
 //
 // LIST is a comma-separated subset of: cpu, cpu_omp, pcl, cuda.
 // --point-step lays the cloud out like a PointCloud2 with that many bytes per point (x, y, z
@@ -47,12 +55,14 @@ struct Options {
   std::string res = "all";
   int iters = 200;
   int warmup = 20;
+  int warmup_ms = 0;
   int threads = 0;
   int point_step = 12;
   CudaInput cuda_input = CudaInput::kAuto;
   std::string cuda_input_name = "auto";
   std::string csv;
   std::string stages_csv;
+  std::string samples_csv;
 };
 
 struct Row {
@@ -78,6 +88,7 @@ struct Runner {
 const char* const kUsage =
     "usage: bench_filter [--backend LIST|all] [--res WxH|all] [--iters N] [--warmup N] [--threads N]\n"
     "                    [--point-step BYTES] [--cuda-input auto|raw|repack] [--csv FILE] [--stages-csv FILE]\n"
+    "                    [--samples-csv FILE] [--warmup-ms MS]\n"
     "       LIST is a comma-separated subset of: cpu, cpu_omp, pcl, cuda\n";
 
 [[noreturn]] void usage(const std::string& error) {
@@ -104,6 +115,7 @@ Options parse(int argc, char** argv) {
     else if (a == "--res") o.res = v;
     else if (a == "--iters") o.iters = std::atoi(v.c_str());
     else if (a == "--warmup") o.warmup = std::atoi(v.c_str());
+    else if (a == "--warmup-ms") o.warmup_ms = std::atoi(v.c_str());
     else if (a == "--threads") o.threads = std::atoi(v.c_str());
     else if (a == "--point-step") o.point_step = std::atoi(v.c_str());
     else if (a == "--cuda-input") {
@@ -115,6 +127,7 @@ Options parse(int argc, char** argv) {
     }
     else if (a == "--csv") o.csv = v;
     else if (a == "--stages-csv") o.stages_csv = v;
+    else if (a == "--samples-csv") o.samples_csv = v;
     else usage("unknown option " + a);
   }
   if (o.iters < 1 || o.warmup < 0 || o.threads < 0) usage("--iters must be >= 1, --warmup and --threads >= 0");
@@ -178,6 +191,15 @@ int main(int argc, char** argv) {
   std::vector<Row> rows;
   std::vector<StageRow> stage_rows;
   std::vector<std::string> speedups;
+  std::FILE* samples = nullptr;
+  if (!o.samples_csv.empty()) {
+    samples = std::fopen(o.samples_csv.c_str(), "w");
+    if (!samples) {
+      std::fprintf(stderr, "error: cannot write %s\n", o.samples_csv.c_str());
+      return 1;
+    }
+    std::fprintf(samples, "resolution,backend,iteration,wall_ms,device_ms,slowest_stage,slowest_stage_ms\n");
+  }
 
   for (const auto& [w, h] : resolutions(o.res)) {
     const std::string res = std::to_string(w) + "x" + std::to_string(h);
@@ -215,7 +237,13 @@ int main(int argc, char** argv) {
         runner.has_device_time = backend == "cuda";
       }
 
-      for (int i = 0; i < o.warmup; ++i) runner.step();
+      const auto warm_start = std::chrono::steady_clock::now();
+      for (int i = 0;; ++i) {
+        const double warm_ms =
+            std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - warm_start).count();
+        if (i >= o.warmup && warm_ms >= o.warmup_ms) break;
+        runner.step();
+      }
       std::vector<double> wall, device;
       std::vector<std::vector<double>> stage;
       std::size_t out_points = 0;
@@ -229,6 +257,14 @@ int main(int argc, char** argv) {
         const auto stages = runner.stages();
         stage.resize(stages.size());
         for (std::size_t k = 0; k < stages.size(); ++k) stage[k].push_back(stages[k].ms);
+        if (samples) {
+          StageTime slowest{"", 0.0};
+          for (const StageTime& st : stages) {
+            if (st.ms > slowest.ms) slowest = st;
+          }
+          std::fprintf(samples, "%s,%s,%d,%.4f,%.4f,%s,%.4f\n", res.c_str(), backend.c_str(), i, wall.back(),
+                       s.device_ms, slowest.name, slowest.ms);
+        }
       }
 
       rows.push_back(make_row(res, cloud.size(), backend, "end_to_end", wall, out_points));
@@ -263,9 +299,10 @@ int main(int argc, char** argv) {
     }
   }
 
-  std::printf("iterations: %d timed after %d warmup, voxel_size=%.2f m, range %.1f to %.1f m, cpu_omp threads: %d, "
+  std::printf("iterations: %d timed after %d warmup (and at least %d ms), voxel_size=%.2f m, range %.1f to %.1f m, cpu_omp threads: %d, "
               "point step: %d bytes, cuda input: %s\n\n",
-              o.iters, o.warmup, params.voxel_size, params.min_range, params.max_range, threads, o.point_step,
+              o.iters, o.warmup, o.warmup_ms, params.voxel_size, params.min_range, params.max_range, threads,
+              o.point_step,
               o.cuda_input_name.c_str());
   std::printf("| resolution | points | backend | timing | median ms | p99 ms | input points/s | output points |\n");
   std::printf("|---|---:|---|---|---:|---:|---:|---:|\n");
@@ -288,6 +325,8 @@ int main(int argc, char** argv) {
       std::printf("| %s | %s | %.3f |\n", r.resolution.c_str(), r.stage.c_str(), r.median_ms);
     }
   }
+
+  if (samples) std::fclose(samples);
 
   if (!o.csv.empty()) {
     std::ofstream csv(o.csv);

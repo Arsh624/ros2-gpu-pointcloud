@@ -59,6 +59,10 @@ add_executable(bench_filter bench/bench_filter.cpp)
 target_compile_options(bench_filter PRIVATE -Wall -Wextra -Wpedantic -O3)
 target_link_libraries(bench_filter gpu_pointcloud_core)
 
+add_executable(bench_idle_gap bench/bench_idle_gap.cpp)
+target_compile_options(bench_idle_gap PRIVATE -Wall -Wextra -Wpedantic -O3)
+target_link_libraries(bench_idle_gap gpu_pointcloud_core)
+
 if(WITH_CUDA)
   add_executable(bench_cuda_input bench/bench_cuda_input.cpp)
   target_compile_options(bench_cuda_input PRIVATE -Wall -Wextra -Wpedantic -O3)
@@ -105,7 +109,7 @@ if(NOT CORE_ONLY)
   if(WITH_CUDA)
     install(TARGETS bench_cuda_input RUNTIME DESTINATION lib/${PROJECT_NAME})
   endif()
-  install(TARGETS pointcloud_filter_node cloud_publisher_node bench_filter RUNTIME DESTINATION lib/${PROJECT_NAME})
+  install(TARGETS pointcloud_filter_node cloud_publisher_node bench_filter bench_idle_gap RUNTIME DESTINATION lib/${PROJECT_NAME})
 
   install(DIRECTORY include/ DESTINATION include)
   install(TARGETS gpu_pointcloud_core
