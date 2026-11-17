@@ -12,6 +12,12 @@
 set -euo pipefail
 
 repo="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+# Transport is not what this script measures, so both processes use Fast DDS over shared memory
+# with a segment large enough for one cloud. With middleware defaults most large clouds are
+# dropped on this machine; see docker/fastdds_shm_large.xml for why.
+export RMW_IMPLEMENTATION="${RMW_IMPLEMENTATION:-rmw_fastrtps_cpp}"
+export FASTRTPS_DEFAULT_PROFILES_FILE="${FASTRTPS_DEFAULT_PROFILES_FILE:-$repo/docker/fastdds_shm_large.xml}"
+echo "RMW_IMPLEMENTATION=$RMW_IMPLEMENTATION FASTRTPS_DEFAULT_PROFILES_FILE=$FASTRTPS_DEFAULT_PROFILES_FILE" >&2
 bin="${GPC_BIN:-/ws/install/gpu_pointcloud/lib/gpu_pointcloud}"
 out="$repo/results"
 mkdir -p "$out"
@@ -52,6 +58,9 @@ for backend in $latency_backends; do
       run "$backend" "$res" "$rate" $((rate * 10 + skip))
       f="$tmp/lat.csv"
       n=$(($(wc -l < "$f") - 1 - skip))
+      # A row built from a fraction of the messages is not comparable; say so loudly.
+      [ "$n" -ge $((rate * 10 * 95 / 100)) ] ||
+        echo "WARNING: $backend $res ${rate} Hz: $n of $((rate * 10)) messages reached the node" >&2
       echo "${backend/:/_},$res,$rate,$n,$(pct "$f" 3 0.5 $skip),$(pct "$f" 4 0.5 $skip),$(pct "$f" 5 0.5 $skip),$(pct "$f" 6 0.5 $skip),$(pct "$f" 7 0.5 $skip),$(pct "$f" 7 0.99 $skip),$(pct "$f" 7 1.0 $skip),$(pct "$f" 8 0.5 $skip),$(tail -n +$((2 + skip)) "$f" | awk -F, '{c += $8; t += $7} END {if (t > 0) printf "%.2f", c / t; else print "nan"}')" \
         | tee -a "$out/node_latency.csv"
     done
