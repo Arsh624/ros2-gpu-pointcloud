@@ -164,8 +164,8 @@ Priority changed after M4: strengthen the evidence before adding features. Items
 
 | Item | State | PR | Key result |
 |---|---|---|---|
-| A. PCL and OpenMP CPU baselines (#8, #9) | in review | | Best CPU is OpenMP on 20 threads. CUDA end-to-end vs best CPU: 0.55x / 0.86x / 1.12x at 320x240 / 640x480 / 1280x720. GPU-only: 1.04x / 2.39x / 4.64x |
-| B. Fix the input copy bottleneck (#5) | next | | |
+| A. PCL and OpenMP CPU baselines (#8, #9) | done | [#13](https://github.com/Arsh624/ros2-gpu-pointcloud/pull/13) | Best CPU is OpenMP on 20 threads. CUDA end-to-end vs best CPU: 0.55x / 0.86x / 1.12x at 320x240 / 640x480 / 1280x720. GPU-only: 1.04x / 2.39x / 4.64x |
+| B. Fix the input copy bottleneck (#5) | in progress | | |
 | C. Explain the CUDA p99 tail at 1280x720 | pending | | |
 | D. Node-level latency and max sustainable rate | pending | | |
 | E. M5 Fast DDS vs Zenoh (#10) | pending | | |
