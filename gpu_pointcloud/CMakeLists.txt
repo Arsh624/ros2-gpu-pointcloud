@@ -63,6 +63,8 @@ if(WITH_CUDA)
   add_executable(bench_cuda_input bench/bench_cuda_input.cpp)
   target_compile_options(bench_cuda_input PRIVATE -Wall -Wextra -Wpedantic -O3)
   target_link_libraries(bench_cuda_input gpu_pointcloud_core)
+  add_executable(bench_h2d bench/bench_h2d.cu)
+  target_link_libraries(bench_h2d CUDA::cudart)
 endif()
 
 # Optional PCL reference pipeline for the benchmark. OFF by default so the package has no PCL
