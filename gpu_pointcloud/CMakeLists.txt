@@ -66,6 +66,15 @@ if(NOT CORE_ONLY)
   target_link_libraries(gpu_pointcloud_conv PUBLIC gpu_pointcloud_core)
   ament_target_dependencies(gpu_pointcloud_conv PUBLIC sensor_msgs std_msgs)
 
+  foreach(node pointcloud_filter_node cloud_publisher_node)
+    add_executable(${node})
+    target_compile_options(${node} PRIVATE -Wall -Wextra -Wpedantic)
+    target_link_libraries(${node} gpu_pointcloud_conv)
+    ament_target_dependencies(${node} rclcpp sensor_msgs)
+  endforeach()
+  target_sources(pointcloud_filter_node PRIVATE src/filter_node.cpp)
+  target_sources(cloud_publisher_node PRIVATE src/cloud_publisher_node.cpp)
+  install(TARGETS pointcloud_filter_node cloud_publisher_node RUNTIME DESTINATION lib/${PROJECT_NAME})
 
   install(DIRECTORY include/ DESTINATION include)
   install(TARGETS gpu_pointcloud_core
