@@ -14,10 +14,10 @@
 | M1 skeleton + CI | done | [#1](https://github.com/Arsh624/ros2-gpu-pointcloud/pull/1) | CI on main: https://github.com/Arsh624/ros2-gpu-pointcloud/actions/runs/44019966683 |
 | M2 CPU filter | done | [#2](https://github.com/Arsh624/ros2-gpu-pointcloud/pull/2) | 24 tests pass, node verified with backend cpu |
 | M3 CUDA filter | done | [#4](https://github.com/Arsh624/ros2-gpu-pointcloud/pull/4) | Parity exact on RTX 4070; compute-sanitizer could not run under WSL2 (see cuts) |
-| M4 benchmark + profile | in review | | 3.96x / 7.55x / 10.53x end-to-end at 320x240 / 640x480 / 1280x720; nsys has no GPU kernel data under WSL2 |
-| M5 networking | pending | | |
-| M6 README + polish | pending | | |
-| M7 release | pending | | |
+| M4 benchmark + profile | done | [#7](https://github.com/Arsh624/ros2-gpu-pointcloud/pull/7) | 3.96x / 7.55x / 10.53x end-to-end at 320x240 / 640x480 / 1280x720; nsys has no GPU kernel data under WSL2 |
+| M5 networking | not started | | Issue https://github.com/Arsh624/ros2-gpu-pointcloud/issues/10  |
+| M6 README + polish | not started | | Issue https://github.com/Arsh624/ros2-gpu-pointcloud/issues/11 |
+| M7 release | not started | | Issue https://github.com/Arsh624/ros2-gpu-pointcloud/issues/12 |
 
 ## Global constraints
 
@@ -135,7 +135,7 @@ ZENOH_CONFIG_OVERRIDE='connect/endpoints=["tcp/router:7447"];listen/endpoints=["
 - [x] PR with the table, merge.
 
 ### M5 to M7
-As written in the brief; expanded here when M4 is merged.
+Not started. Each has a GitHub issue with the exact task and acceptance criteria (linked in the table above). Other follow-ups: compute-sanitizer run (#3), input copy removal (#5), Nsight timeline screenshot (#6), PCL baseline (#8), multi-threaded CPU baseline (#9).
 
 ## Cuts and deviations
 
