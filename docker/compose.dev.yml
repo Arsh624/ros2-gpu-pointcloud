@@ -1,6 +1,6 @@
 # Dev container. Usage (from repo root):
 #   docker compose -f docker/compose.dev.yml up -d --build
-#   docker exec gpc-dev bash -lc "colcon build ..."
+#   docker exec gpc-dev /ros_entrypoint.sh colcon build
 name: gpc
 
 services:
