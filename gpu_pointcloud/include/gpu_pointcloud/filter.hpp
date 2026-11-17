@@ -27,6 +27,9 @@ struct FilterStats {
   std::size_t out_of_range = 0;
   std::size_t index_overflow = 0;
   std::size_t out = 0;  // occupied voxels
+  // CUDA only: time of the device pipeline for this call, measured with cudaEvents and excluding
+  // the host-to-device input copy and device-to-host output copy. 0 on the CPU backend.
+  double device_ms = 0.0;
 };
 
 // Throws std::invalid_argument unless voxel_size > 0, 0 <= min_range <= max_range, all finite.
