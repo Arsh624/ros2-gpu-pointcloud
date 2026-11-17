@@ -1,9 +1,11 @@
 // bench_filter: times the filter backends on the synthetic clouds. No ROS.
 //
 //   bench_filter [--backend LIST|all] [--res WxH|all] [--iters N] [--warmup N] [--threads N]
-//                [--csv FILE] [--stages-csv FILE]
+//                [--point-step BYTES] [--cuda-input auto|raw|repack] [--csv FILE] [--stages-csv FILE]
 //
 // LIST is a comma-separated subset of: cpu, cpu_omp, pcl, cuda.
+// --point-step lays the cloud out like a PointCloud2 with that many bytes per point (x, y, z
+// first, the rest filler) and filters it in place; 12 (the default) is packed xyz.
 //
 // Backends and what their timing covers:
 //   cpu     / end_to_end : single-threaded reference; steady_clock around Filter::apply
@@ -18,7 +20,9 @@
 #include <chrono>
 #include <cmath>
 #include <cstdio>
+#include <cstdint>
 #include <cstdlib>
+#include <cstring>
 #include <fstream>
 #include <functional>
 #include <memory>
@@ -44,6 +48,9 @@ struct Options {
   int iters = 200;
   int warmup = 20;
   int threads = 0;
+  int point_step = 12;
+  CudaInput cuda_input = CudaInput::kAuto;
+  std::string cuda_input_name = "auto";
   std::string csv;
   std::string stages_csv;
 };
@@ -70,7 +77,7 @@ struct Runner {
 
 const char* const kUsage =
     "usage: bench_filter [--backend LIST|all] [--res WxH|all] [--iters N] [--warmup N] [--threads N]\n"
-    "                    [--csv FILE] [--stages-csv FILE]\n"
+    "                    [--point-step BYTES] [--cuda-input auto|raw|repack] [--csv FILE] [--stages-csv FILE]\n"
     "       LIST is a comma-separated subset of: cpu, cpu_omp, pcl, cuda\n";
 
 [[noreturn]] void usage(const std::string& error) {
@@ -98,11 +105,20 @@ Options parse(int argc, char** argv) {
     else if (a == "--iters") o.iters = std::atoi(v.c_str());
     else if (a == "--warmup") o.warmup = std::atoi(v.c_str());
     else if (a == "--threads") o.threads = std::atoi(v.c_str());
+    else if (a == "--point-step") o.point_step = std::atoi(v.c_str());
+    else if (a == "--cuda-input") {
+      o.cuda_input_name = v;
+      if (v == "auto") o.cuda_input = CudaInput::kAuto;
+      else if (v == "raw") o.cuda_input = CudaInput::kRaw;
+      else if (v == "repack") o.cuda_input = CudaInput::kRepack;
+      else usage("--cuda-input must be auto, raw or repack");
+    }
     else if (a == "--csv") o.csv = v;
     else if (a == "--stages-csv") o.stages_csv = v;
     else usage("unknown option " + a);
   }
   if (o.iters < 1 || o.warmup < 0 || o.threads < 0) usage("--iters must be >= 1, --warmup and --threads >= 0");
+  if (o.point_step < 12) usage("--point-step must be at least 12");
 
   if (backend == "all") {
     // Everything this build and machine can run; unavailable backends are skipped with a note.
@@ -166,6 +182,14 @@ int main(int argc, char** argv) {
   for (const auto& [w, h] : resolutions(o.res)) {
     const std::string res = std::to_string(w) + "x" + std::to_string(h);
     const auto cloud = make_synthetic_cloud(w, h);
+    // The filters read this view in place. With --point-step 12 it is the cloud itself.
+    std::vector<std::uint8_t> strided;
+    CloudView view = as_view(cloud.data(), cloud.size());
+    if (o.point_step != 12) {
+      strided.assign(cloud.size() * o.point_step, 0xCD);
+      for (std::size_t i = 0; i < cloud.size(); ++i) std::memcpy(&strided[i * o.point_step], &cloud[i], sizeof(PointXYZ));
+      view = {strided.data(), cloud.size(), static_cast<std::size_t>(o.point_step), 0, 4, 8};
+    }
     double cpu_median = 0.0, best_cpu_median = 0.0, cuda_e2e = 0.0, cuda_gpu = 0.0;
     std::string best_cpu;
 
@@ -185,8 +209,8 @@ int main(int argc, char** argv) {
       if (backend != "pcl") {
         if (backend == "cpu") filter = make_cpu_filter(params);
         else if (backend == "cpu_omp") filter = make_cpu_omp_filter(params, threads);
-        else filter = make_cuda_filter(params, cloud.size());
-        runner.step = [&] { return filter->apply(cloud.data(), cloud.size(), out); };
+        else filter = make_cuda_filter(params, cloud.size(), o.cuda_input);
+        runner.step = [&] { return filter->apply(view, out); };
         runner.stages = [&] { return filter->last_stage_times(); };
         runner.has_device_time = backend == "cuda";
       }
@@ -239,8 +263,10 @@ int main(int argc, char** argv) {
     }
   }
 
-  std::printf("iterations: %d timed after %d warmup, voxel_size=%.2f m, range %.1f to %.1f m, cpu_omp threads: %d\n\n",
-              o.iters, o.warmup, params.voxel_size, params.min_range, params.max_range, threads);
+  std::printf("iterations: %d timed after %d warmup, voxel_size=%.2f m, range %.1f to %.1f m, cpu_omp threads: %d, "
+              "point step: %d bytes, cuda input: %s\n\n",
+              o.iters, o.warmup, params.voxel_size, params.min_range, params.max_range, threads, o.point_step,
+              o.cuda_input_name.c_str());
   std::printf("| resolution | points | backend | timing | median ms | p99 ms | input points/s | output points |\n");
   std::printf("|---|---:|---|---|---:|---:|---:|---:|\n");
   for (const Row& r : rows) {
