@@ -32,6 +32,7 @@ endif()
 
 set(CORE_SOURCES
   src/filter_cpu.cpp
+  src/synthetic.cpp
   # --- core sources are appended here in later milestones ---
 )
 if(WITH_CUDA)
@@ -59,6 +60,22 @@ if(NOT CORE_ONLY)
   find_package(sensor_msgs REQUIRED)
   find_package(std_msgs REQUIRED)
 
+  add_library(gpu_pointcloud_conv STATIC src/cloud_conv.cpp)
+  set_target_properties(gpu_pointcloud_conv PROPERTIES POSITION_INDEPENDENT_CODE ON)
+  target_compile_options(gpu_pointcloud_conv PRIVATE -Wall -Wextra -Wpedantic)
+  target_link_libraries(gpu_pointcloud_conv PUBLIC gpu_pointcloud_core)
+  ament_target_dependencies(gpu_pointcloud_conv PUBLIC sensor_msgs std_msgs)
+
+  foreach(node pointcloud_filter_node cloud_publisher_node)
+    add_executable(${node})
+    target_compile_options(${node} PRIVATE -Wall -Wextra -Wpedantic)
+    target_link_libraries(${node} gpu_pointcloud_conv)
+    ament_target_dependencies(${node} rclcpp sensor_msgs)
+  endforeach()
+  target_sources(pointcloud_filter_node PRIVATE src/filter_node.cpp)
+  target_sources(cloud_publisher_node PRIVATE src/cloud_publisher_node.cpp)
+  install(TARGETS pointcloud_filter_node cloud_publisher_node RUNTIME DESTINATION lib/${PROJECT_NAME})
+
   install(DIRECTORY include/ DESTINATION include)
   install(TARGETS gpu_pointcloud_core
     ARCHIVE DESTINATION lib
@@ -67,7 +84,10 @@ if(NOT CORE_ONLY)
 
   if(BUILD_TESTING)
     find_package(ament_cmake_gtest REQUIRED)
-    # tests are added here in later milestones
+    ament_add_gtest(test_filter_cpu test/test_filter_cpu.cpp)
+    target_link_libraries(test_filter_cpu gpu_pointcloud_core)
+    ament_add_gtest(test_cloud_conv test/test_cloud_conv.cpp)
+    target_link_libraries(test_cloud_conv gpu_pointcloud_conv)
   endif()
 
   ament_package()
