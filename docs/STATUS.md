@@ -15,7 +15,7 @@
 | M2 CPU filter | done | [#2](https://github.com/Arsh624/ros2-gpu-pointcloud/pull/2) | 24 tests pass, node verified with backend cpu |
 | M3 CUDA filter | done | [#4](https://github.com/Arsh624/ros2-gpu-pointcloud/pull/4) | Parity exact on RTX 4070; compute-sanitizer could not run under WSL2 (see cuts) |
 | M4 benchmark + profile | done | [#7](https://github.com/Arsh624/ros2-gpu-pointcloud/pull/7) | 3.96x / 7.55x / 10.53x end-to-end at 320x240 / 640x480 / 1280x720; nsys has no GPU kernel data under WSL2 |
-| M5 networking | not started | | Issue https://github.com/Arsh624/ros2-gpu-pointcloud/issues/10  |
+| M5 networking | done | [#18](https://github.com/Arsh624/ros2-gpu-pointcloud/pull/18) | Fast DDS defaults drop 13-37% across containers; Zenoh and Fast DDS LARGE_DATA 0% |
 | M6 README + polish | done | [#17](https://github.com/Arsh624/ros2-gpu-pointcloud/pull/17) | README rewrite, before/after plot, description and topics |
 | M7 release | done | [#17](https://github.com/Arsh624/ros2-gpu-pointcloud/pull/17) | v0.1.0: https://github.com/Arsh624/ros2-gpu-pointcloud/releases/tag/v0.1.0 |
 
@@ -168,7 +168,7 @@ Priority changed after M4: strengthen the evidence before adding features. Items
 | B. Fix the input copy bottleneck (#5) | done | [#14](https://github.com/Arsh624/ros2-gpu-pointcloud/pull/14) | CUDA end-to-end 0.442 / 0.998 / 2.356 ms -> 0.430 / 0.792 / 1.702 ms (main run); vs best CPU 0.57x / 1.11x / 1.63x. Over 7 launches 1280x720 is ~1.5 ms (5) or ~2.4 ms (2) |
 | C. Explain the CUDA p99 tail at 1280x720 | done | [#15](https://github.com/Arsh624/ros2-gpu-pointcloud/pull/15) | Environmental: GPU idles to P8 (210 MHz) during the CPU runs and needs ~250-320 ms to clock up; the tail was the first timed iterations. Benchmark warmup now also lasts 500 ms. With idle gaps CUDA 1280x720 is 3.0 ms at 30 Hz and 7.0 ms at 10 Hz (cpu_omp: 3.2 and 4.7 ms) |
 | D. Node-level latency and CPU cost per frame | done | [#16](https://github.com/Arsh624/ros2-gpu-pointcloud/pull/16) | 1280x720 at 30 Hz: CUDA 3.48 ms on 0.96 cores, cpu_omp 12 threads 6.68 ms on 4.55 cores; at 10 Hz CUDA 11.07 ms (idle clock-down). Image lacked Fast DDS (nodes ran on Cyclone); with middleware defaults large clouds dropped in-container, fixed for node runs with `docker/fastdds_shm_large.xml` |
-| E. M5 Fast DDS vs Zenoh (#10) | pending | | |
+| E. M5 Fast DDS vs Zenoh (#10) | done | [#18](https://github.com/Arsh624/ros2-gpu-pointcloud/pull/18) | Raw 3.7 MB cloud across containers: Fast DDS defaults drop 37.4% / 32.5% at 10 / 30 Hz; Zenoh 0%, p50 4.28 / 4.00 ms; Fast DDS LARGE_DATA (tuned) 0%, p50 4.15 / 4.14 ms |
 | F. M6 README rewrite (#11), M7 release (#12) | done | [#17](https://github.com/Arsh624/ros2-gpu-pointcloud/pull/17) | README rewritten (results led by node latency and cores), quick start run once in a fresh container, `results/before_after.png`, CHANGELOG v0.1.0, release v0.1.0 |
 
 Notes for whoever continues:
@@ -182,7 +182,7 @@ Notes for whoever continues:
 
 ## Where this stopped, and exact next steps
 
-Items D and F are done and v0.1.0 is released. Next: E (networking), then a README network section and v0.2.0. Everything below is what a new session needs; nothing else is in anyone's head.
+Items D, E and F are done and v0.1.0 is released. Next: README network section and v0.2.0. Everything below is what a new session needs; nothing else is in anyone's head.
 
 ### Before anything else
 
@@ -197,45 +197,9 @@ Expect 81 tests, 0 failures, 1 skipped. From Git Bash on Windows set `MSYS_NO_PA
 
 The two discarded runs were not caused by stale shared-memory files: a fresh container dropped just as much. Root cause and fix are in `docs/DESIGN.md`, "Middleware for same-host node runs". In short: the image had no Fast DDS, so the default RMW was Cyclone DDS; with defaults, best-effort clouds of 0.9 MB and more do not fit the UDP path (Docker VM `net.core.rmem_max = 212992`) or Fast DDS's 512 KB SHM segment. `node_bench.sh` now runs Fast DDS with `docker/fastdds_shm_large.xml` and warns if a row is missing messages. The image must be rebuilt once (`docker compose -f docker/compose.dev.yml build`) to get Fast DDS.
 
-### Item E: Fast DDS vs rmw_zenoh (issue #10)
+### Item E: done (PR #18)
 
-What already exists and can be reused as it is:
-
-- `cloud_publisher_node`: parameters `width`, `height`, `rate` (double), `count`, `point_step`, `wait_for_subscribers`; stamps `header.stamp = now()`; prints `publisher_summary sent=N achieved_hz=X requested_hz=Y` on exit.
-- `pointcloud_filter_node` with `latency_csv`: its `transport_ms` column is `now - header.stamp` at callback entry, so it already measures transport latency for the raw cloud.
-
-What has to be written:
-
-1. `gpu_pointcloud/src/latency_listener_node.cpp` (add to `CMakeLists.txt` next to the other nodes). Subscribes to `cloud` with `SensorDataQoS`. Parameters: `samples` (default 2000), `csv` (path), `expected_hz` (double). Per message record `latency_ms = now - header.stamp` and `bytes = data.size()`. After `samples` messages, or 10 s without a message, write the CSV (`latency_ms,bytes` per row) and print one summary line: `p50_ms p99_ms max_ms msgs_per_s mb_per_s received`. Then exit. Drops are `sent - received`, with `sent` from the publisher's summary line, so no sequence number is needed. Write it test-first where there is logic to test (the percentile and rate arithmetic belong in a small function with a gtest).
-2. `docker/compose.net.yml`: services `router`, `talker`, `listener`, all `image: ros2-gpu-pointcloud:dev`, on one bridge network, repo and a shared results directory mounted. They are separate containers, so separate network namespaces and no shared-memory transport. The binaries must exist in each container: either mount a prebuilt install directory, or run `colcon build` in each at start (slow). Mounting `/ws/install` from a named volume that the dev container also uses is the simplest.
-3. `scripts/net_bench.sh`: for RMW in {`rmw_fastrtps_cpp`, `rmw_zenoh_cpp`}, payload in {raw 640x480, filtered}, rate in {10, 30}: start the listener, start the publisher with `count` = 2000 + 50 and `wait_for_subscribers:=1`, collect the listener's summary and the publisher's `sent`. For the filtered payload run `pointcloud_filter_node` in the talker container between publisher and listener (publisher `cloud:=input`, listener `cloud:=output`). Write `results/net.csv` with columns `rmw,payload,rate_hz,bytes,sent,received,drop_pct,p50_ms,p99_ms,max_ms,msgs_per_s,mb_per_s`.
-
-Zenoh configuration, verified in M0 with `rmw_zenoh_cpp` 0.2.13 (the first attempt without the `listen` override discovered topics but delivered no data):
-
-```
-# router container
-RMW_IMPLEMENTATION=rmw_zenoh_cpp
-command: ros2 run rmw_zenoh_cpp rmw_zenohd
-
-# talker and listener containers
-RMW_IMPLEMENTATION=rmw_zenoh_cpp
-ZENOH_CONFIG_OVERRIDE='connect/endpoints=["tcp/router:7447"];listen/endpoints=["tcp/0.0.0.0:0"]'
-```
-
-For Fast DDS set `RMW_IMPLEMENTATION=rmw_fastrtps_cpp` and no other configuration. Expect heavy drops for the raw cloud: across containers there is no shared memory, and UDP is capped by the Docker VM's 208 KB `net.core.rmem_max` (item D). Report that as measured; the VM setting is outside this repo.
-
-Things already observed that will matter:
-
-- The raw cloud from `cloud_publisher_node` is 12 bytes per point: 3.69 MB at 640x480, not the 4.9 MB the brief assumed. Report the measured size. `point_step:=16` gives 4.9 MB if that payload is wanted as well.
-- Inside one container with the default RMW, `transport_ms` for the 3.7 MB cloud was already about 11 ms, and the publisher could not exceed about 96 Hz at 640x480 or about 33 Hz at 1280x720. Across containers it will be slower. Large best-effort messages may drop under Fast DDS defaults; report that as measured.
-- Pass `rate` as a double (`-p rate:=30.0`). An integer aborts the node with a parameter type error.
-
-Acceptance criteria for E:
-
-- `results/net.csv` committed, one row per configuration (2 RMWs x 2 payloads x 2 rates = 8 rows), produced by the script, with 2000 samples per row or the reason there are fewer.
-- README section stating: single host, Docker bridge network, separate network namespaces so no shared memory, same clock on both ends, not a real LAN, two-machine test is future work.
-- Default middleware settings first. At most one tuned configuration, clearly labelled, and only if the defaults drop messages.
-- PR with the script's real output in the body; issue #10 closed by it.
+`latency_listener_node` (stats in `latency_stats.hpp`, tested), publisher `filter:=true`, `docker/compose.net.yml`, `scripts/net_bench.sh` (runs on the host), `results/net.csv` with 12 rows: 8 with middleware defaults plus 4 for the one labelled tuning (Fast DDS `LARGE_DATA`), added because the defaults dropped messages. Method and choices: `docs/DESIGN.md`, "Network benchmark". Deviation from the plan above: the filtered payload is filtered once by the publisher, not by a filter node in the talker container.
 
 ### Item F: done (PR #17)
 
