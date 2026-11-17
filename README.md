@@ -144,6 +144,10 @@ Environment: NVIDIA GeForce RTX 4070 Laptop GPU (driver 616.64, CUDA 12.6), Inte
 
 The first per-stage breakdown (cudaEvents around every stage) showed that getting the cloud onto the GPU cost more than everything the GPU then did with it: 1.62 ms of 2.36 ms at 1280x720. The input path at that point was a `memcpy` into a pinned staging buffer followed by one asynchronous transfer.
 
+![Nsight Systems timeline of one CUDA filter frame](results/nsys_timeline.png)
+
+One 640x480 frame in Nsight Systems, recorded with `scripts/profile.sh` before this change: NVTX stage ranges (`h2d`, `classify+select`, `sort`, `reduce_by_key`, `d2h`) and the CUDA API calls under them. Under WSL2 Nsight records no GPU kernel rows, so the bars are host-side ranges that end at a stream synchronize; the per-stage numbers in this README come from cudaEvents.
+
 What the measurements showed ([docs/DESIGN.md](docs/DESIGN.md), "Input path"):
 
 - The host `memcpy` was 0.45 ms of the 1.62 ms.
