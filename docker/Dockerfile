@@ -25,6 +25,11 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         cuda-nsight-systems-12-6 \
     && rm -rf /var/lib/apt/lists/*
 
+# Layer 5: PCL, used only by the optional PCL baseline in the benchmark (WITH_PCL=ON)
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        libpcl-dev \
+    && rm -rf /var/lib/apt/lists/*
+
 RUN printf '%s\n' \
         '#!/bin/bash' \
         'set -e' \
