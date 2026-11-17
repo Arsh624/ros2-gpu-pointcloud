@@ -182,7 +182,7 @@ Notes for whoever continues:
 
 ## Where this stopped, and exact next steps
 
-Items D, E and F are done and v0.1.0 is released. Next: README network section and v0.2.0. Everything below is what a new session needs; nothing else is in anyone's head.
+Items D, E and F are done; v0.1.0 and v0.2.0 are released (v0.2.0 adds the README network section, PR #20). What is left is in "Open questions" below and the open issues. Everything below is what a new session needs; nothing else is in anyone's head.
 
 ### Before anything else
 
@@ -205,7 +205,7 @@ The two discarded runs were not caused by stale shared-memory files: a fresh con
 
 README rewritten; every quick-start command was run once in a fresh dev container (build, test, node with each backend, `bench.sh`, `node_bench.sh`, plot). `bench_filter --dump` and `scripts/plot_before_after.py` make `results/before_after.png`. The dev container now has a 1 GB `/dev/shm` and sets `FASTRTPS_DEFAULT_PROFILES_FILE` (each Fast DDS process takes a 16 MB segment; with 64 MB, a fourth participant such as `ros2 topic echo` failed to start). Repo description and topics set; v0.1.0 released.
 
-After E: add a "Networking" section to the README (before Limitations) from `results/net.csv`, replace the networking limitation bullet, add a v0.2.0 CHANGELOG section and `gh release create v0.2.0`.
+README network section and v0.2.0: done in PR #20. Two-machine test: issue #19.
 
 ### Open questions worth an hour each, in order of value
 
