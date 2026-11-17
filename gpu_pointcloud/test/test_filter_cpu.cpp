@@ -81,3 +81,45 @@ TEST(Synthetic, FilteredCloudIsMuchSmallerThanInput) {
   EXPECT_GT(s.non_finite, 0u);
   EXPECT_GT(s.out_of_range, 0u);
 }
+
+// --- OpenMP backend: same cases, and bit-identical output to the serial backend ---
+
+namespace {
+std::unique_ptr<Filter> make_cpu_omp4(const FilterParams& p) { return make_cpu_omp_filter(p, 4); }
+}  // namespace
+
+INSTANTIATE_TEST_SUITE_P(CpuOmp, FilterCases,
+                         ::testing::Values(gpu_pointcloud::cases::Backend{"cpu_omp", false, &make_cpu_omp4}),
+                         ::testing::PrintToStringParamName());
+
+TEST(CpuOmp, MatchesSerialBitForBitAtAnyThreadCount) {
+  for (const auto& res : {std::pair<int, int>{320, 240}, {640, 480}, {1280, 720}}) {
+    const auto cloud = make_synthetic_cloud(res.first, res.second);
+    std::vector<PointXYZ> expected;
+    const FilterStats se = make_cpu_filter({})->apply(cloud.data(), cloud.size(), expected);
+    for (int threads : {1, 2, 7, 32}) {
+      std::vector<PointXYZ> got;
+      const FilterStats sg = make_cpu_omp_filter({}, threads)->apply(cloud.data(), cloud.size(), got);
+      EXPECT_EQ(sg.non_finite, se.non_finite);
+      EXPECT_EQ(sg.out_of_range, se.out_of_range);
+      EXPECT_EQ(sg.index_overflow, se.index_overflow);
+      ASSERT_EQ(got.size(), expected.size()) << res.first << "x" << res.second << " threads=" << threads;
+      std::size_t same = 0;
+      for (std::size_t i = 0; i < got.size(); ++i) {
+        same += got[i].x == expected[i].x && got[i].y == expected[i].y && got[i].z == expected[i].z;
+      }
+      EXPECT_EQ(same, got.size()) << res.first << "x" << res.second << " threads=" << threads;
+    }
+  }
+}
+
+TEST(CpuOmp, MoreThreadsThanPointsStillWorks) {
+  std::vector<PointXYZ> out;
+  const std::vector<PointXYZ> in{{1.f, 1.f, 1.f}, {1.01f, 1.01f, 1.01f}, {2.f, 2.f, 2.f}};
+  EXPECT_EQ(make_cpu_omp_filter({}, 64)->apply(in.data(), in.size(), out).out, 2u);
+}
+
+TEST(CpuOmp, ReportsAPositiveDefaultThreadCount) {
+  EXPECT_GE(default_cpu_threads(), 1);
+  EXPECT_THROW(make_cpu_omp_filter({}, -1), std::invalid_argument);
+}

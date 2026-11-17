@@ -32,6 +32,7 @@ endif()
 
 set(CORE_SOURCES
   src/filter_cpu.cpp
+  src/filter_cpu_omp.cpp
   src/synthetic.cpp
   # --- core sources are appended here in later milestones ---
 )
@@ -39,8 +40,10 @@ if(WITH_CUDA)
   list(APPEND CORE_SOURCES src/filter_cuda.cu)
 endif()
 
+find_package(OpenMP REQUIRED COMPONENTS CXX)
 add_library(gpu_pointcloud_core STATIC ${CORE_SOURCES})
 set_target_properties(gpu_pointcloud_core PROPERTIES POSITION_INDEPENDENT_CODE ON)
+target_link_libraries(gpu_pointcloud_core PUBLIC OpenMP::OpenMP_CXX)
 target_include_directories(gpu_pointcloud_core PUBLIC
   $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
   $<INSTALL_INTERFACE:include>)
