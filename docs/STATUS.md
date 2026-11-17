@@ -167,7 +167,7 @@ Priority changed after M4: strengthen the evidence before adding features. Items
 | A. PCL and OpenMP CPU baselines (#8, #9) | done | [#13](https://github.com/Arsh624/ros2-gpu-pointcloud/pull/13) | Best CPU is OpenMP on 20 threads. CUDA end-to-end vs best CPU: 0.55x / 0.86x / 1.12x at 320x240 / 640x480 / 1280x720. GPU-only: 1.04x / 2.39x / 4.64x |
 | B. Fix the input copy bottleneck (#5) | done | [#14](https://github.com/Arsh624/ros2-gpu-pointcloud/pull/14) | CUDA end-to-end 0.442 / 0.998 / 2.356 ms -> 0.430 / 0.792 / 1.702 ms (main run); vs best CPU 0.57x / 1.11x / 1.63x. Over 7 launches 1280x720 is ~1.5 ms (5) or ~2.4 ms (2) |
 | C. Explain the CUDA p99 tail at 1280x720 | done | [#15](https://github.com/Arsh624/ros2-gpu-pointcloud/pull/15) | Environmental: GPU idles to P8 (210 MHz) during the CPU runs and needs ~250-320 ms to clock up; the tail was the first timed iterations. Benchmark warmup now also lasts 500 ms. With idle gaps CUDA 1280x720 is 3.0 ms at 30 Hz and 7.0 ms at 10 Hz (cpu_omp: 3.2 and 4.7 ms) |
-| D. Node-level latency and CPU cost per frame | in progress, branch `d-node-latency` pushed, not merged | | Code is done and committed. `results/node_latency.csv` is NOT committed yet: see "Item D: how to finish" below |
+| D. Node-level latency and CPU cost per frame | done | [#16](https://github.com/Arsh624/ros2-gpu-pointcloud/pull/16) | 1280x720 at 30 Hz: CUDA 3.48 ms on 0.96 cores, cpu_omp 12 threads 6.68 ms on 4.55 cores; at 10 Hz CUDA 11.07 ms (idle clock-down). Image lacked Fast DDS (nodes ran on Cyclone); with middleware defaults large clouds dropped in-container, fixed for node runs with `docker/fastdds_shm_large.xml` |
 | E. M5 Fast DDS vs Zenoh (#10) | pending | | |
 | F. M6 README rewrite (#11), M7 release (#12) | pending | | |
 
@@ -182,7 +182,7 @@ Notes for whoever continues:
 
 ## Where this stopped, and exact next steps
 
-Work stopped during item D (see "Item D: how to finish"). Items E and F are not started. Everything below is what a new session needs; nothing else is in anyone's head.
+Item D is done. Next: F (README rewrite, release v0.1.0), then E. Everything below is what a new session needs; nothing else is in anyone's head.
 
 ### Before anything else
 
@@ -193,18 +193,9 @@ docker exec gpc-dev /ros_entrypoint.sh bash -c 'cd /ws && colcon build --cmake-a
 
 Expect 81 tests, 0 failures, 1 skipped. From Git Bash on Windows set `MSYS_NO_PATHCONV=1` first. The container's `/ws/build` is lost when the container is recreated; the build takes about a minute.
 
-### Item D: how to finish
+### Item D: done (PR #16)
 
-Branch `d-node-latency` has all the code: `pointcloud2_view` (zero-copy PointCloud2 view, tested), the node's `cpu_omp` backend, `cpu_threads` and `latency_csv` parameters (per message: transport, view, filter, publish, total and process CPU time from getrusage), the publisher's `point_step` and `wait_for_subscribers`, and `scripts/node_bench.sh`.
-
-What is left:
-
-1. Make sure nothing else runs in the container: `docker exec gpc-dev ps -eo pcpu,comm --sort=-pcpu | head`. A first run was thrown away because stray `pointcloud_filter_node` processes from earlier manual tests were using seven cores. Kill strays with `pkill -9 -f pointcloud_filt` and `pkill -9 -f cloud_publisher`.
-   A second run was also thrown away: after the strays were killed with `-9`, almost every message was dropped (about 10 of 120 received). Suspected cause: stale Fast DDS shared-memory files left by the killed processes. Clear them before running: `docker exec gpc-dev bash -c 'rm -f /dev/shm/fastrtps_* /dev/shm/sem.fastrtps_*'`, or recreate the container (`docker compose -f docker/compose.dev.yml up -d --force-recreate`, then rebuild). Check the `messages` column: it should be close to 100 at 10 Hz and 300 at 30 Hz.
-2. Run `docker exec gpc-dev /ros_entrypoint.sh bash /ws/src/ros2-gpu-pointcloud/scripts/node_bench.sh` (about six minutes). It writes `results/node_latency.csv`: per backend (cpu, cpu_omp_12, cpu_omp_20, cuda), resolution and rate (10, 30 Hz): p50 of transport, view, filter, publish and total ms, p99 and max of total, p50 CPU ms per frame and average cores (CPU time / wall time inside the callback).
-3. Sanity-check before publishing: `cpu` should use about 1.0 cores; in a clean trial `cpu_omp` with 12 threads filtered 640x480 in about 2.2 ms and 1280x720 in about 5.6 ms, `cuda` in about 2.0 and 3.8 to 4.7 ms. Numbers far from these mean the container was not idle.
-4. Add a "Node-level latency and CPU cost" table to the README from that CSV, commit the CSV, open the PR with the table in the body, merge.
-5. The rising-rate sweep (`RATE_SWEEP=1`) was deliberately skipped.
+The two discarded runs were not caused by stale shared-memory files: a fresh container dropped just as much. Root cause and fix are in `docs/DESIGN.md`, "Middleware for same-host node runs". In short: the image had no Fast DDS, so the default RMW was Cyclone DDS; with defaults, best-effort clouds of 0.9 MB and more do not fit the UDP path (Docker VM `net.core.rmem_max = 212992`) or Fast DDS's 512 KB SHM segment. `node_bench.sh` now runs Fast DDS with `docker/fastdds_shm_large.xml` and warns if a row is missing messages. The image must be rebuilt once (`docker compose -f docker/compose.dev.yml build`) to get Fast DDS.
 
 ### Item E: Fast DDS vs rmw_zenoh (issue #10)
 
@@ -231,7 +222,7 @@ RMW_IMPLEMENTATION=rmw_zenoh_cpp
 ZENOH_CONFIG_OVERRIDE='connect/endpoints=["tcp/router:7447"];listen/endpoints=["tcp/0.0.0.0:0"]'
 ```
 
-For Fast DDS set `RMW_IMPLEMENTATION=rmw_fastrtps_cpp` and no other configuration.
+For Fast DDS set `RMW_IMPLEMENTATION=rmw_fastrtps_cpp` and no other configuration. Expect heavy drops for the raw cloud: across containers there is no shared memory, and UDP is capped by the Docker VM's 208 KB `net.core.rmem_max` (item D). Report that as measured; the VM setting is outside this repo.
 
 Things already observed that will matter:
 
