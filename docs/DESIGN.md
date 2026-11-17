@@ -51,3 +51,39 @@ docker exec gpc-dev /ros_entrypoint.sh bash -c 'cd /ws && colcon build'
 ```
 
 From Git Bash on Windows, set `MSYS_NO_PATHCONV=1` first so `/ros_entrypoint.sh` is not rewritten to a Windows path.
+
+## CUDA pipeline
+
+Per frame, on one stream:
+
+| Stage | How | Why |
+|---|---|---|
+| H2D | `memcpy` into a pinned buffer, `cudaMemcpyAsync` | Pinned memory makes the copy asynchronous and avoids a staging copy inside the driver |
+| Classify | one kernel: finite test, range test, voxel key, keep flag | One pass over the input; uses the same `detail::classify` as the CPU code |
+| Select | `cub::DeviceSelect::Flagged` over a counting iterator | Yields the indices of kept points, so later stages never touch rejected ones |
+| Gather keys | small kernel | Keys of kept points, contiguous, ready to sort |
+| Sort | `cub::DeviceRadixSort::SortPairs` on (key, index) with `DoubleBuffer` | Brings equal keys together; ascending key order is the output order |
+| Reduce | `cub::DeviceReduce::ReduceByKey` over a transform iterator that loads `(x, y, z, 1)` as doubles by index | Sums and counts per voxel without materialising a sorted copy of the points |
+| Centroid | small kernel: sum / count, cast to float32 | |
+| D2H | `cudaMemcpyAsync` into a pinned buffer, then `memcpy` into the caller's vector | |
+
+Decisions:
+
+- **Nothing is allocated per frame.** Device buffers, both pinned host buffers and the CUB temporary storage are sized once for `reserve_points` (the node reserves 1280x720). A larger cloud reallocates once and the new size is kept. The three CUB stages share one temporary buffer sized for the largest of them.
+- **Narrowed sort key.** A kept point has `|coord| <= max_range`, so its voxel index lies in `[-L, L]` with `L = ceil(max_range / voxel_size) + 1`. The kernel rebases each 21-bit field by `2^20 - L` and repacks with just enough bits per axis. The order is the same as for the canonical key, but the radix sort only processes `3 * bits` bits: 27 with the defaults instead of 63. When `L` does not fit in fewer than 21 bits the canonical key is used unchanged.
+- **Reject counters.** Each block counts its rejected points per class in shared memory and adds the totals to three global counters, so there is one global atomic per block and class instead of one per rejected point.
+- **Two host syncs inside the pipeline.** CUB takes item counts as host values, so the host must read the kept count before the sort and the voxel count before the output copy. Both are a few bytes read through a pinned buffer.
+- **Double sums on the GPU.** `ReduceByKey` may add in a different order than the sequential loop on the CPU. With double accumulation the measured difference in the parity tests is 0 m on every tested cloud; the guaranteed bound stays 1e-4 m.
+- **Device time.** `FilterStats::device_ms` is measured with cudaEvents recorded after the input copy is queued and before the output copy, so it covers the device pipeline including the two small syncs but excludes H2D and D2H of the cloud.
+- **NVTX ranges** wrap each stage so a profile shows the stages by name.
+
+## Known verification gap: compute-sanitizer
+
+`compute-sanitizer --tool memcheck` does not run in this environment (CUDA 12.6 in Docker on WSL2):
+
+```
+========= Error: Failed to initialize WDDM debugger interface. Please run EnableDebuggerInterface.bat as an administrator
+========= Error: Device not supported. Please refer to the "Supported Devices" section of the sanitizer documentation
+```
+
+The two errors in its summary are these start-up errors, not memory errors: the tool never attached to the device. The CUDA code has therefore **not** been checked by compute-sanitizer. Running it on native Linux, or after enabling the Windows debugger interface, is tracked in [issue #3](https://github.com/Arsh624/ros2-gpu-pointcloud/issues/3).
