@@ -8,11 +8,14 @@
 #include <algorithm>
 #include <array>
 #include <cmath>
+#include <cstdint>
+#include <cstring>
 #include <limits>
 #include <memory>
 #include <ostream>
 #include <random>
 #include <stdexcept>
+#include <string>
 #include <vector>
 
 #include "gpu_pointcloud/filter.hpp"
@@ -189,6 +192,84 @@ TEST_P(FilterCases, InvalidParamsThrow) {
     EXPECT_THROW(GetParam().make(p), std::invalid_argument)
         << "voxel_size=" << p.voxel_size << " min=" << p.min_range << " max=" << p.max_range;
   }
+}
+
+
+// --- strided input (CloudView) ---
+
+// Builds a buffer with `stride` bytes per point, x/y/z at the given offsets and 0xCD junk
+// everywhere else. A leading pad shifts the whole buffer off its natural alignment.
+struct StridedCloud {
+  std::vector<std::uint8_t> bytes;
+  CloudView view;
+};
+
+inline StridedCloud make_strided(const std::vector<PointXYZ>& points, std::size_t stride, std::size_t ox,
+                                 std::size_t oy, std::size_t oz, std::size_t lead = 0) {
+  StridedCloud s;
+  s.bytes.assign(lead + points.size() * stride, 0xCD);
+  for (std::size_t i = 0; i < points.size(); ++i) {
+    std::uint8_t* p = s.bytes.data() + lead + i * stride;
+    std::memcpy(p + ox, &points[i].x, 4);
+    std::memcpy(p + oy, &points[i].y, 4);
+    std::memcpy(p + oz, &points[i].z, 4);
+  }
+  s.view = {s.bytes.data() + lead, points.size(), stride, ox, oy, oz};
+  return s;
+}
+
+inline std::vector<PointXYZ> mixed_points() {
+  const float nan = std::numeric_limits<float>::quiet_NaN();
+  std::vector<PointXYZ> pts{{nan, 0.f, 0.f}, {0.f, 0.f, 0.f}, {20.f, 0.f, 0.f}};
+  std::mt19937 rng(11);
+  std::uniform_real_distribution<float> coord(-4.f, 4.f);
+  for (int i = 0; i < 5000; ++i) pts.push_back({coord(rng), coord(rng), coord(rng)});
+  return pts;
+}
+
+TEST_P(FilterCases, StridedViewsGiveTheSameResultAsPackedPoints) {
+  const auto points = mixed_points();
+  auto filter = GetParam().make({});
+  std::vector<PointXYZ> expected;
+  const FilterStats se = filter->apply(points.data(), points.size(), expected);
+  ASSERT_GT(expected.size(), 100u);
+
+  struct Layout {
+    std::size_t stride, ox, oy, oz, lead;
+  };
+  const Layout layouts[] = {
+      {12, 0, 4, 8, 0},    // packed, via the view interface
+      {16, 0, 4, 8, 0},    // xyz + intensity
+      {32, 0, 4, 8, 0},    // typical RGB-D layout
+      {32, 16, 4, 24, 0},  // fields out of order
+      {13, 1, 5, 9, 0},    // nothing 4-byte aligned
+      {16, 0, 4, 8, 3},    // aligned layout in a misaligned buffer
+  };
+  for (const Layout& l : layouts) {
+    const StridedCloud s = make_strided(points, l.stride, l.ox, l.oy, l.oz, l.lead);
+    std::vector<PointXYZ> got;
+    const FilterStats sg = filter->apply(s.view, got);
+    const std::string where = "stride=" + std::to_string(l.stride) + " x_offset=" + std::to_string(l.ox) +
+                              " lead=" + std::to_string(l.lead);
+    EXPECT_EQ(sg.non_finite, se.non_finite) << where;
+    EXPECT_EQ(sg.out_of_range, se.out_of_range) << where;
+    ASSERT_EQ(got.size(), expected.size()) << where;
+    std::size_t same = 0;
+    for (std::size_t i = 0; i < got.size(); ++i) {
+      same += got[i].x == expected[i].x && got[i].y == expected[i].y && got[i].z == expected[i].z;
+    }
+    EXPECT_EQ(same, got.size()) << where;
+  }
+}
+
+TEST_P(FilterCases, MalformedViewsThrow) {
+  auto filter = GetParam().make({});
+  std::vector<PointXYZ> out;
+  const std::vector<std::uint8_t> bytes(64, 0);
+  EXPECT_THROW(filter->apply(CloudView{bytes.data(), 4, 16, 0, 4, 13}, out), std::invalid_argument);  // z past stride
+  EXPECT_THROW(filter->apply(CloudView{bytes.data(), 4, 8, 0, 4, 8}, out), std::invalid_argument);    // stride too small
+  EXPECT_THROW(filter->apply(CloudView{nullptr, 4, 16, 0, 4, 8}, out), std::invalid_argument);        // null data
+  EXPECT_EQ(filter->apply(CloudView{nullptr, 0, 16, 0, 4, 8}, out).out, 0u);                          // empty is fine
 }
 
 }  // namespace gpu_pointcloud::cases

@@ -95,3 +95,14 @@ std::unique_ptr<Filter> make_cuda_filter(const FilterParams&, std::size_t) {
 #endif
 
 }  // namespace gpu_pointcloud
+
+namespace gpu_pointcloud {
+
+void validate(const CloudView& v) {
+  const bool fields_fit = v.x_offset + sizeof(float) <= v.stride && v.y_offset + sizeof(float) <= v.stride &&
+                          v.z_offset + sizeof(float) <= v.stride;
+  if (!fields_fit) throw std::invalid_argument("cloud view: an x/y/z field extends past the point stride");
+  if (v.count > 0 && v.data == nullptr) throw std::invalid_argument("cloud view: null data with a non-zero count");
+}
+
+}  // namespace gpu_pointcloud

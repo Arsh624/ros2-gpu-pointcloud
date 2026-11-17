@@ -5,6 +5,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <memory>
+#include <stdexcept>
 #include <vector>
 
 namespace gpu_pointcloud {
@@ -37,8 +38,26 @@ struct StageTime {
   double ms;
 };
 
+// A read-only view of `count` points inside someone else's buffer: point i starts at
+// data + i * stride and holds float32 x, y, z at the given byte offsets. This is the layout of a
+// sensor_msgs/PointCloud2 without row padding, so a message can be filtered without repacking.
+// Offsets and stride need no particular alignment.
+struct CloudView {
+  const std::uint8_t* data = nullptr;
+  std::size_t count = 0;
+  std::size_t stride = sizeof(PointXYZ);
+  std::size_t x_offset = 0, y_offset = 4, z_offset = 8;
+};
+
+inline CloudView as_view(const PointXYZ* points, std::size_t n) {
+  return {reinterpret_cast<const std::uint8_t*>(points), n, sizeof(PointXYZ), 0, 4, 8};
+}
+
 // Throws std::invalid_argument unless voxel_size > 0, 0 <= min_range <= max_range, all finite.
 void validate(const FilterParams& params);
+// Throws std::invalid_argument when a field would extend past `stride`, or when count > 0 and
+// data is null.
+void validate(const CloudView& view);
 
 // Packs the voxel index of `p` into a sortable key: 21 bits per axis, x in the high bits.
 // Returns false (key untouched) when an index is outside [-2^20, 2^20). `p` must be finite.
@@ -49,7 +68,18 @@ bool voxel_key(const PointXYZ& p, float voxel_size, std::uint64_t& key);
 class Filter {
  public:
   virtual ~Filter() = default;
-  // `out` is replaced. `in` may be null when n == 0. Not thread-safe; reuse one instance per stream.
+  // Filters points read in place from a strided buffer. `out` is replaced.
+  // Throws std::invalid_argument when the view is malformed (see validate(const CloudView&)).
+  // Not thread-safe; reuse one instance per stream.
+  virtual FilterStats apply(const CloudView& in, std::vector<PointXYZ>& out) {
+    // Temporary until the backends read strided input: packed xyz only.
+    validate(in);
+    if (in.stride != sizeof(PointXYZ) || in.x_offset != 0 || in.y_offset != 4 || in.z_offset != 8) {
+      throw std::logic_error("strided input is not implemented yet");
+    }
+    return apply(reinterpret_cast<const PointXYZ*>(in.data), in.count, out);
+  }
+  // Convenience for packed points. `in` may be null when n == 0.
   virtual FilterStats apply(const PointXYZ* in, std::size_t n, std::vector<PointXYZ>& out) = 0;
   // Per-stage timings of the last non-empty apply() call, in pipeline order. Empty on backends
   // that do not measure stages (CPU).
