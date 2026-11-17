@@ -90,7 +90,7 @@ std::unique_ptr<Filter> make_cpu_omp_filter(const FilterParams& params, int thre
 int default_cpu_threads();
 // How the CUDA backend gets a strided cloud onto the device.
 enum class CudaInput {
-  kAuto,    // the measured best: same as kRaw (data in docs/DESIGN.md, "Input path")
+  kAuto,    // raw for points up to 16 bytes, repack for wider ones (docs/DESIGN.md, "Input path")
   kRaw,     // upload the bytes as they are and read x, y, z by offset on the device; layouts
             // that are not 4-byte aligned are repacked, since the device cannot read them
   kRepack,  // gather x, y, z into a packed host buffer first, then upload 12 bytes per point

@@ -322,7 +322,8 @@ class CudaFilter final : public Filter {
     const bool packed = v.stride == sizeof(PointXYZ) && v.x_offset == 0 && v.y_offset == 4 && v.z_offset == 8;
     if (packed) return true;
     const bool aligned = v.stride % 4 == 0 && v.x_offset % 4 == 0 && v.y_offset % 4 == 0 && v.z_offset % 4 == 0;
-    return aligned && input_mode_ != CudaInput::kRepack;
+    if (!aligned || input_mode_ == CudaInput::kRepack) return false;
+    return input_mode_ == CudaInput::kRaw || v.stride <= kAutoRawMaxStride;
   }
 
   void ensure_input(std::size_t bytes) {
@@ -406,6 +407,10 @@ class CudaFilter final : public Filter {
   cudaEvent_t ev_[kNumMarks] = {};
   double stage_ms_[kNumMarks - 1] = {};
 
+  // Auto mode uploads raw bytes up to this point stride and repacks wider points on the host.
+  // Measured in results/cuda_input_modes.csv: at 16 bytes raw wins at every size; at 32 bytes
+  // repack wins at 320x240 and 640x480 and loses slightly at 1280x720.
+  static constexpr std::size_t kAutoRawMaxStride = 16;
   CudaInput input_mode_;
   std::uint8_t* d_input_ = nullptr;  // the cloud as uploaded (raw or packed)
   std::size_t input_bytes_ = 0;
