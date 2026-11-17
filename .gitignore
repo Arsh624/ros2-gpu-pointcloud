@@ -1,0 +1,7 @@
+build/
+install/
+log/
+results/*.nsys-rep
+results/*.sqlite
+BRIEF.local.md
+.claude/
