@@ -1,0 +1,50 @@
+# GitHub-hosted runners have no GPU, so CUDA code is compiled here but
+# GPU tests run only locally.
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  ros-cpu:
+    name: ROS 2 Jazzy build + test (CPU)
+    runs-on: ubuntu-24.04
+    container: ros:jazzy-ros-base
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: src/ros2-gpu-pointcloud
+      - name: Install dependencies
+        run: |
+          apt-get update
+          apt-get install -y --no-install-recommends ros-jazzy-ament-cmake-gtest ros-jazzy-sensor-msgs
+      - name: Build
+        run: source /opt/ros/jazzy/setup.bash && colcon build --cmake-args -DWITH_CUDA=OFF
+      - name: Test
+        run: source /opt/ros/jazzy/setup.bash && colcon test --event-handlers console_direct+
+      - name: Test results
+        run: colcon test-result --verbose
+
+  cuda-compile:
+    name: CUDA core library compile (no GPU)
+    runs-on: ubuntu-24.04
+    container: nvidia/cuda:12.6.3-devel-ubuntu24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install CMake
+        run: |
+          apt-get update
+          apt-get install -y --no-install-recommends cmake
+      - name: Configure
+        run: cmake -S gpu_pointcloud -B build -DCORE_ONLY=ON -DWITH_CUDA=ON
+      - name: Build
+        run: cmake --build build -j2
