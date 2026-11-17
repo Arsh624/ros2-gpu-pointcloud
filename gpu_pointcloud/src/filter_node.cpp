@@ -8,6 +8,10 @@
 //   filter_ms     Filter::apply
 //   publish_ms    building the output message and publish(), which serialises it
 //   total_ms      callback entry to return of publish()
+//   cpu_ms        CPU time the whole process used during the callback (getrusage user + system,
+//                 all threads); cpu_ms / total_ms is the average number of cores in use
+#include <sys/resource.h>
+
 #include <chrono>
 #include <cstdio>
 #include <exception>
@@ -29,6 +33,13 @@ using Clock = std::chrono::steady_clock;
 
 // Device buffers are preallocated for a 1280x720 cloud; larger inputs grow them once.
 constexpr std::size_t kCudaReservePoints = 1280 * 720;
+
+// User + system CPU time of this process so far, all threads, in milliseconds.
+double process_cpu_ms() {
+  rusage u{};
+  getrusage(RUSAGE_SELF, &u);
+  return (u.ru_utime.tv_sec + u.ru_stime.tv_sec) * 1e3 + (u.ru_utime.tv_usec + u.ru_stime.tv_usec) * 1e-3;
+}
 
 double ms_between(Clock::time_point a, Clock::time_point b) {
   return std::chrono::duration<double, std::milli>(b - a).count();
@@ -72,10 +83,10 @@ class FilterNode : public rclcpp::Node {
       RCLCPP_ERROR(get_logger(), "cannot write %s", latency_csv_.c_str());
       return;
     }
-    std::fprintf(f, "points_in,points_out,transport_ms,view_ms,filter_ms,publish_ms,total_ms\n");
+    std::fprintf(f, "points_in,points_out,transport_ms,view_ms,filter_ms,publish_ms,total_ms,cpu_ms\n");
     for (const Row& r : rows_) {
-      std::fprintf(f, "%zu,%zu,%.4f,%.4f,%.4f,%.4f,%.4f\n", r.points_in, r.points_out, r.transport_ms, r.view_ms,
-                   r.filter_ms, r.publish_ms, r.total_ms);
+      std::fprintf(f, "%zu,%zu,%.4f,%.4f,%.4f,%.4f,%.4f,%.4f\n", r.points_in, r.points_out, r.transport_ms, r.view_ms,
+                   r.filter_ms, r.publish_ms, r.total_ms, r.cpu_ms);
     }
     std::fclose(f);
   }
@@ -83,10 +94,11 @@ class FilterNode : public rclcpp::Node {
  private:
   struct Row {
     std::size_t points_in, points_out;
-    double transport_ms, view_ms, filter_ms, publish_ms, total_ms;
+    double transport_ms, view_ms, filter_ms, publish_ms, total_ms, cpu_ms;
   };
 
   void on_cloud(const PointCloud2& msg) {
+    const double cpu0 = latency_csv_.empty() ? 0.0 : process_cpu_ms();
     const auto t0 = Clock::now();
     const double transport_ms = (now() - rclcpp::Time(msg.header.stamp)).seconds() * 1e3;
 
@@ -111,7 +123,7 @@ class FilterNode : public rclcpp::Node {
 
     if (!latency_csv_.empty()) {
       rows_.push_back({stats.in, stats.out, transport_ms, ms_between(t0, t1), ms_between(t1, t2), ms_between(t2, t3),
-                       ms_between(t0, t3)});
+                       ms_between(t0, t3), process_cpu_ms() - cpu0});
     }
     RCLCPP_DEBUG(get_logger(), "in=%zu out=%zu non_finite=%zu out_of_range=%zu index_overflow=%zu", stats.in,
                  stats.out, stats.non_finite, stats.out_of_range, stats.index_overflow);

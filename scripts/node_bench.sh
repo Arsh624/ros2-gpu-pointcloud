@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # Node-level benchmark: runs pointcloud_filter_node against cloud_publisher_node in this container
 # (two processes, default RMW) and measures, per backend and resolution:
-#   1. callback latency at 10 Hz and 30 Hz  -> results/node_latency.csv
-#   2. what happens as the input rate rises -> results/node_rate.csv
+#   1. callback latency and CPU time per frame at 10 Hz and 30 Hz -> results/node_latency.csv
+#   2. (only with RATE_SWEEP=1) what happens as the input rate rises -> results/node_rate.csv
 # Run inside the dev container after `colcon build`:
 #   docker exec gpc-dev /ros_entrypoint.sh bash /ws/src/ros2-gpu-pointcloud/scripts/node_bench.sh
 #
@@ -18,7 +18,7 @@ mkdir -p "$out"
 tmp="$(mktemp -d)"
 trap 'rm -rf "$tmp"' EXIT
 
-latency_backends="${LATENCY_BACKENDS:-cpu cpu_omp:8 cpu_omp:12 cpu_omp:16 cpu_omp:20 cuda}"
+latency_backends="${LATENCY_BACKENDS:-cpu cpu_omp:12 cpu_omp:20 cuda}"
 rate_backends="${RATE_BACKENDS:-cpu cpu_omp:12 cpu_omp:20 cuda}"
 resolutions="${RESOLUTIONS:-320x240 640x480 1280x720}"
 skip=20   # messages dropped from the start of every latency log (start-up)
@@ -44,7 +44,7 @@ run() {
   wait "$node_pid" || true
 }
 
-echo "backend,resolution,rate_hz,messages,transport_p50_ms,view_p50_ms,filter_p50_ms,publish_p50_ms,total_p50_ms,total_p99_ms,total_max_ms" \
+echo "backend,resolution,rate_hz,messages,transport_p50_ms,view_p50_ms,filter_p50_ms,publish_p50_ms,total_p50_ms,total_p99_ms,total_max_ms,cpu_p50_ms,avg_cores" \
   > "$out/node_latency.csv"
 for backend in $latency_backends; do
   for res in $resolutions; do
@@ -52,11 +52,13 @@ for backend in $latency_backends; do
       run "$backend" "$res" "$rate" $((rate * 10 + skip))
       f="$tmp/lat.csv"
       n=$(($(wc -l < "$f") - 1 - skip))
-      echo "${backend/:/_},$res,$rate,$n,$(pct "$f" 3 0.5 $skip),$(pct "$f" 4 0.5 $skip),$(pct "$f" 5 0.5 $skip),$(pct "$f" 6 0.5 $skip),$(pct "$f" 7 0.5 $skip),$(pct "$f" 7 0.99 $skip),$(pct "$f" 7 1.0 $skip)" \
+      echo "${backend/:/_},$res,$rate,$n,$(pct "$f" 3 0.5 $skip),$(pct "$f" 4 0.5 $skip),$(pct "$f" 5 0.5 $skip),$(pct "$f" 6 0.5 $skip),$(pct "$f" 7 0.5 $skip),$(pct "$f" 7 0.99 $skip),$(pct "$f" 7 1.0 $skip),$(pct "$f" 8 0.5 $skip),$(tail -n +$((2 + skip)) "$f" | awk -F, '{c += $8; t += $7} END {if (t > 0) printf "%.2f", c / t; else print "nan"}')" \
         | tee -a "$out/node_latency.csv"
     done
   done
 done
+
+[ "${RATE_SWEEP:-0}" = 1 ] || exit 0
 
 # Rising input rate, 4 s per step. "received" is what reached the node's callback.
 echo "backend,resolution,requested_hz,achieved_hz,sent,received,drop_pct,total_p50_ms" > "$out/node_rate.csv"
