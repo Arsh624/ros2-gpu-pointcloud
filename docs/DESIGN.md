@@ -213,3 +213,47 @@ What was ruled out, each by a direct measurement:
 What that leaves: something in the driver's transfer path under WSL2 that is fixed when a filter instance (its stream and device buffers) is created. It was not traced further, and nothing in this repository's code selects between the two states. On native Linux the effect may not exist; that has not been tested.
 
 Consequence for reading the benchmark: a single launch can land in either state, so `scripts/bench.sh` also records seven separate launches, and the README reports their range.
+
+## Idle GPU: the p99 tail and what a frame rate does
+
+### The symptom
+
+The M4 and baseline runs reported a CUDA p99 of 12.3 ms and 11.4 ms at 1280x720 against medians of 2.4 ms.
+
+### What it was
+
+`bench_filter --samples-csv` writes every timed iteration. In a run that shows the tail (`results/p99_tail_example.csv`), iterations 0 to 4 take 11.4 to 11.6 ms, iteration 5 takes 8.5 ms, and from iteration 6 on everything is at 1.9 to 2.2 ms. In the slow iterations the input stage is 6.8 ms and the device pipeline 4.1 ms: everything is slow, not one stage.
+
+The tail appeared only when all backends and all resolutions ran in one process, never in CUDA-only or single-resolution runs. In the all-backends run the GPU idles for about six seconds at 1280x720 while `cpu` and `cpu_omp` are measured, and then gets 20 warmup iterations.
+
+### Ruled out
+
+- **Per-frame allocation.** The filter allocates nothing per frame, and the slow iterations are the first ones, not scattered.
+- **First touch.** The 20 warmup iterations have already used every buffer.
+- **Sync points.** The two host syncs are in every iteration; they do not explain 5 slow iterations followed by 195 normal ones.
+- **A recurring stall.** 2000 consecutive frames in a CUDA-only process had a maximum of 3.1 ms (old input path: 4.6 ms).
+
+### The cause: GPU power state
+
+`nvidia-smi --query-gpu=pstate,clocks.current.graphics,clocks.current.memory,power.draw`:
+
+| | Performance state | Core clock | Memory clock | Power |
+|---|---|---:|---:|---:|
+| Idle | P8 | 210 MHz | 405 MHz | 2 W |
+| During the benchmark | P0 | 2625 MHz | 7001 to 8201 MHz | 33 W |
+
+`bench_idle_gap` measures a call after a controlled idle gap (`results/idle_gap.csv`) and the recovery after 3 s of idle (`results/idle_recovery.csv`):
+
+- With no gap a 1280x720 CUDA call takes 1.49 ms. With a 100 ms gap before every call the median is 6.96 ms, and with 300 ms or more it is about 12.7 ms.
+- After 3 s idle, 28 consecutive 1280x720 calls took 10.5 to 12.9 ms before the time dropped to 1.7 ms: about 320 ms of work. In another run it was 17 calls, about 220 ms. At 640x480 one run recovered after 48 calls of about 5 ms (about 245 ms) and another had not recovered after 60 calls (about 300 ms).
+- A background thread making a tiny CUDA call every 2 ms does not keep the device fast (`results/idle_gap_keepalive.csv`): 11.5 ms at 300 ms gaps. Every 10 ms and every 50 ms were also tried, with the same result. The clocks follow load, not the mere presence of work.
+
+So this is the laptop GPU's dynamic power management. Nothing in the filter causes it and nothing cheap in the filter prevents it. Options outside this repository that were not tested: the "prefer maximum performance" power mode in the NVIDIA control panel on the Windows host, or a desktop or embedded GPU with different power management.
+
+The OpenMP backend has a smaller version of the same problem: its worker threads sleep when idle. With a 100 ms gap a 1280x720 call takes 4.7 ms instead of 2.7 ms, and individual calls after a gap reached 20 to 70 ms.
+
+### What changed in this repository
+
+- `bench_filter --warmup-ms`: warmup lasts until both the iteration count and this time are reached. `scripts/bench.sh` uses 20 iterations and 500 ms. Checked by counting CUDA iterations above 5 ms over repeated all-backend runs: without it 2 of 6 runs had some (13 and 8), with it 0 of 8.
+- `bench_idle_gap` and its three result files, so the tight-loop numbers are not the only ones published.
+- A side effect worth knowing when comparing runs: with the longer warmup the GPU-only medians dropped (1280x720: 0.62 ms to 0.44 ms). The earlier runs were measuring a GPU that was not always fully clocked up.

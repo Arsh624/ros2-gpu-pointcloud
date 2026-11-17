@@ -8,49 +8,77 @@ A ROS 2 Jazzy node that range-filters and voxel-downsamples point clouds. It has
 
 ## Benchmark
 
-Median of 200 timed iterations after 20 warmup iterations, default parameters (voxel 0.05 m, range 0.3 to 10 m), synthetic depth-camera cloud, packed xyz input (12 bytes per point). Raw data is in [results/](results): `bench.csv`, `cuda_launches.csv`, `cpu_omp_threads.csv`, `stages.csv`, `cuda_input_modes.csv`, `env.txt`.
+Default parameters (voxel 0.05 m, range 0.3 to 10 m), synthetic depth-camera cloud, packed xyz input (12 bytes per point). Each number is the median of 200 timed iterations after a warmup of 20 iterations and at least 500 ms. Raw data is in [results/](results).
 
 Environment: NVIDIA GeForce RTX 4070 Laptop GPU (driver 616.64, CUDA 12.6), Intel Core i9-14900HX with 20 logical CPUs visible to the container, PCL 1.14.0, Docker on WSL2 (kernel 5.15.167.4), laptop on AC power.
 
-### Headline: CUDA against the best CPU baseline
+There are two different questions here and they have different answers:
+
+1. **Back to back**, how fast is each backend when it is called in a tight loop?
+2. **At a camera's frame rate**, how long does one call take when the backend sat idle since the last frame?
+
+### 1. Back to back: CUDA against the best CPU baseline
 
 The best CPU baseline at every resolution is this repository's OpenMP backend on 20 threads.
 
 | Resolution | Points | Best CPU (OpenMP, 20 threads) ms | CUDA end-to-end ms | CUDA GPU-only ms | End-to-end speedup | GPU-only speedup |
 |---|---:|---:|---:|---:|---:|---:|
-| 320x240 | 76,800 | 0.247 | 0.430 | 0.244 | 0.57x | 1.01x |
-| 640x480 | 307,200 | 0.876 | 0.792 | 0.335 | 1.11x | 2.62x |
-| 1280x720 | 921,600 | 2.774 | 1.702 | 0.617 | 1.63x | 4.49x |
+| 320x240 | 76,800 | 0.246 | 0.415 | 0.218 | 0.59x | 1.13x |
+| 640x480 | 307,200 | 0.914 | 0.705 | 0.256 | 1.30x | 3.57x |
+| 1280x720 | 921,600 | 2.889 | 1.641 | 0.435 | 1.76x | 6.64x |
 
-Measured end to end on this machine, the GPU is slower than 20 CPU threads at 320x240, 11% faster at 640x480 and 1.6x faster at 1280x720.
+In a tight loop the GPU is slower than 20 CPU threads at 320x240, 1.3x faster at 640x480 and 1.8x faster at 1280x720, end to end.
 
-**The CUDA end-to-end time depends on the process launch.** The same binary run seven times under the same protocol gave these medians ([results/cuda_launches.csv](results/cuda_launches.csv)):
+**The CUDA end-to-end time also depends on the process launch.** The same binary run seven times gave these medians ([results/cuda_launches.csv](results/cuda_launches.csv)):
 
 | Resolution | Fastest launch ms | Median launch ms | Slowest launch ms | Speedup vs best CPU, slowest to fastest |
 |---|---:|---:|---:|---:|
-| 320x240 | 0.371 | 0.394 | 0.512 | 0.48x to 0.67x |
-| 640x480 | 0.697 | 0.769 | 1.051 | 0.83x to 1.26x |
-| 1280x720 | 1.471 | 1.521 | 2.397 | 1.16x to 1.89x |
+| 320x240 | 0.384 | 0.489 | 0.512 | 0.48x to 0.64x |
+| 640x480 | 0.704 | 0.733 | 1.122 | 0.81x to 1.30x |
+| 1280x720 | 1.504 | 1.666 | 2.423 | 1.19x to 1.92x |
 
-At 1280x720 the launches fall into two groups, five near 1.5 ms and two near 2.4 ms. The difference is entirely in the host-to-device transfer stage, which takes about 0.93 ms or about 1.74 ms for the same 11 MB. In the slow launches plain host `memcpy` and the CPU filter run at their normal speed, and the same transfer measured outside the filter is always fast, so this is not host memory, CPU core speed or buffer allocation. It sits in the driver's transfer path under WSL2 and was not traced further ([docs/DESIGN.md](docs/DESIGN.md), "Input path"). The headline table is the main run, which landed between the two groups.
+At 1280x720 four launches were between 1.50 and 1.67 ms and three were near 2.4 ms. The difference is in the host-to-device transfer stage, which takes about 0.93 ms or about 1.74 ms for the same 11 MB. Host memory speed, CPU core type, buffer allocation and the bare transfer call were each ruled out by measurement; it sits in the driver's transfer path under WSL2 and was not traced further ([docs/DESIGN.md](docs/DESIGN.md), "Two transfer rates").
 
-### All backends
+### 2. At a frame rate: idle gaps change the picture
+
+A benchmark loop never lets the GPU rest. A camera does. `bench_idle_gap` sleeps before every call and times the call ([results/idle_gap.csv](results/idle_gap.csv)). Median ms per call:
+
+| Idle gap before each call | cpu_omp 640x480 | cuda 640x480 | cpu_omp 1280x720 | cuda 1280x720 |
+|---|---:|---:|---:|---:|
+| none (tight loop) | 0.91 | 0.71 | 2.69 | 1.49 |
+| 10 ms | 1.20 | 1.28 | 2.98 | 2.11 |
+| 33 ms (30 Hz) | 1.37 | 1.94 | 3.21 | 3.03 |
+| 100 ms (10 Hz) | 1.72 | 1.95 | 4.71 | 6.96 |
+| 300 ms | 7.03 | 5.94 | 9.39 | 12.71 |
+| 1 s | 6.74 | 6.05 | 7.33 | 13.00 |
+
+Both backends slow down when they have been idle, and the GPU slows down more:
+
+- **At 30 Hz the two are about level** (CUDA 6% faster at 1280x720, 40% slower at 640x480).
+- **At 10 Hz the CPU is faster at both sizes** (1280x720: 4.7 ms against 7.0 ms).
+- After a long idle a 1280x720 CUDA call takes about 12.7 ms, eight times its tight-loop time.
+
+The cause on the GPU side is its power management. `nvidia-smi` reports the idle GPU in performance state P8 at 210 MHz core / 405 MHz memory clock and 2 W; under the benchmark it is in P0 at 2625 MHz / 7000 to 8200 MHz and 33 W. After 3 s of idle it takes roughly a quarter to a third of a second of continuous work before calls are back to full speed ([results/idle_recovery.csv](results/idle_recovery.csv)). A tiny GPU call every 2 ms in the background does not prevent this ([results/idle_gap_keepalive.csv](results/idle_gap_keepalive.csv)): the clocks follow load, not activity. The CPU side slows because the OpenMP worker threads go to sleep; its worst single calls after a gap reached 20 to 70 ms.
+
+So on this laptop, **the GPU backend only pays off when it is kept busy**: at high frame rates, with large clouds, or when several streams share it. For one 640x480 camera at 10 to 30 Hz the OpenMP backend is the better choice here. A desktop or embedded GPU with different power management may behave differently; that has not been measured.
+
+### All backends, back to back
 
 Median ms (99th percentile in brackets), from the main run:
 
 | Resolution | cpu (1 thread) | pcl (1 thread) | cpu_omp (20 threads) | cuda end-to-end | cuda GPU-only | Output points |
 |---|---:|---:|---:|---:|---:|---:|
-| 320x240 | 1.900 (2.312) | 1.552 (1.777) | 0.247 (0.392) | 0.430 (0.556) | 0.244 (0.336) | 20,785 |
-| 640x480 | 7.964 (8.780) | 4.987 (5.581) | 0.876 (1.283) | 0.792 (1.031) | 0.335 (0.512) | 34,654 |
-| 1280x720 | 24.909 (27.972) | 13.869 (15.163) | 2.774 (3.391) | 1.702 (2.024) | 0.617 (0.762) | 39,514 |
+| 320x240 | 1.894 (2.174) | 1.603 (1.972) | 0.246 (0.490) | 0.415 (0.676) | 0.218 (0.376) | 20,785 |
+| 640x480 | 8.732 (12.042) | 5.011 (6.015) | 0.914 (1.583) | 0.705 (0.815) | 0.256 (0.339) | 34,654 |
+| 1280x720 | 26.156 (29.344) | 14.242 (17.667) | 2.889 (12.901) | 1.641 (1.917) | 0.435 (0.547) | 39,514 |
 
 CUDA end-to-end speedup against each single-threaded baseline:
 
 | Resolution | vs cpu (1 thread) | vs pcl (1 thread) |
 |---|---:|---:|
-| 320x240 | 4.42x | 3.61x |
-| 640x480 | 10.05x | 6.30x |
-| 1280x720 | 14.64x | 8.15x |
+| 320x240 | 4.56x | 3.86x |
+| 640x480 | 12.38x | 7.11x |
+| 1280x720 | 15.93x | 8.68x |
 
 How to read this:
 
@@ -61,29 +89,34 @@ How to read this:
 - **cuda GPU-only** is the device pipeline between the two transfers, timed with cudaEvents.
 - CPU and CUDA backends return the same voxel count and, on these synthetic clouds, identical centroids. The tested tolerance is 1e-4 m per axis.
 - The clouds are synthetic. Real sensor data will have a different ratio of input points to occupied voxels.
-- This is a laptop: 20 CPU threads against a mobile GPU reached through WSL2. The balance will differ on other hardware.
 
-### The bottleneck: profiled, changed, measured again
+### The input bottleneck: profiled, changed, measured again
 
 The first per-stage breakdown showed that getting the cloud onto the GPU cost more than everything the GPU then did with it: 1.62 ms of 2.36 ms at 1280x720. The input path at that point was a `memcpy` into a pinned staging buffer followed by one asynchronous transfer.
 
-What the measurements showed ([docs/DESIGN.md](docs/DESIGN.md) has the numbers and method):
+What the measurements showed ([docs/DESIGN.md](docs/DESIGN.md), "Input path"):
 
-- The host `memcpy` was only 0.45 ms of the 1.62 ms. The transfer itself was the slow part.
-- A transfer straight from the caller's ordinary (pageable) memory takes about as long as the transfer from pinned memory did, so the staging `memcpy` bought nothing here and could be removed.
-- For 16-byte points, uploading the raw bytes and reading x, y, z by offset on the device beat gathering x, y, z on the host first at every size. For 32-byte points the host gather was faster at 320x240 and 640x480 and slightly slower at 1280x720 ([results/cuda_input_modes.csv](results/cuda_input_modes.csv)).
+- The host `memcpy` was 0.45 ms of the 1.62 ms.
+- A transfer straight from the caller's ordinary (pageable) memory takes about as long as the transfer from pinned memory did, so the staging copy bought nothing here and could be removed.
+- For 16-byte points, uploading the raw bytes and reading x, y, z by offset on the device beat gathering x, y, z on the host first at every size. For 32-byte points the host gather was faster at 320x240 and 640x480 and slightly slower at 1280x720.
 
-So every backend now takes a strided view of the caller's buffer (the layout of a PointCloud2), and the CUDA backend uploads it without a staging copy: raw for points up to 16 bytes, host-gathered for wider ones. The pinned input buffer is gone.
+So every backend now takes a strided view of the caller's buffer (the layout of a PointCloud2), and the CUDA backend uploads it without a staging copy: raw for points up to 16 bytes, host-gathered for wider ones.
 
 | | 320x240 | 640x480 | 1280x720 |
 |---|---:|---:|---:|
 | Input stage before, ms | 0.127 | 0.517 | 1.618 |
-| Input stage after, ms | 0.102 | 0.346 | 0.987 |
+| Input stage after, ms | 0.110 | 0.342 | 1.053 |
 | CUDA end-to-end before, ms | 0.442 | 0.998 | 2.356 |
-| CUDA end-to-end after, main run, ms | 0.430 | 0.792 | 1.702 |
-| CUDA end-to-end after, median of 7 launches, ms | 0.394 | 0.769 | 1.521 |
+| CUDA end-to-end after, main run, ms | 0.415 | 0.705 | 1.641 |
+| CUDA end-to-end after, median of 7 launches, ms | 0.489 | 0.733 | 1.666 |
 
-In the slower launch state the 1280x720 time (about 2.4 ms) is no better than before the change. The "before" numbers come from single launches whose state was not recorded, so the size of the improvement is known only for the common, faster state: about 2.36 ms to about 1.5 ms. The input transfer is still the largest stage (0.99 ms of 1.70 ms).
+In the slower launch state the 1280x720 time (about 2.4 ms) is no better than before the change. The "before" numbers come from single launches whose state was not recorded, so the size of the improvement is only established for the faster state. The input transfer is still the largest stage (1.05 ms of 1.64 ms).
+
+### The p99 tail: explained
+
+Earlier runs showed a CUDA 99th percentile of 11 to 12 ms at 1280x720 against a 2.4 ms median. Per-iteration samples ([results/p99_tail_example.csv](results/p99_tail_example.csv)) show these were the first few timed iterations, each about 11.5 ms, after which every iteration was normal. The GPU had idled for several seconds while the CPU backends ran in the same process, and the 20 warmup iterations ended before it was back at full clock. It is the same effect as in section 2, not a recurring stall and not an allocation or synchronisation in the filter.
+
+The benchmark now warms up for at least 500 ms as well as 20 iterations. Without that, 2 of 6 runs had slow timed iterations (13 and 8 of them); with it, 0 of 8 runs had any, and the CUDA p99 at 1280x720 is 1.9 ms.
 
 ### History
 
@@ -93,9 +126,10 @@ Earlier runs are kept in [results/history](results/history) so changes can be co
 |---|---|---:|---:|---:|
 | [m4](results/history/m4) | First benchmark | 0.461 | 1.049 | 2.439 |
 | [a-baselines](results/history/a-baselines) | OpenMP and PCL baselines added; no change to the CUDA code | 0.442 | 0.998 | 2.356 |
-| current | Direct upload of the input buffer, fields read on the device | 0.430 | 0.792 | 1.702 |
+| [b-input-path](results/history/b-input-path) | Direct upload of the input buffer, fields read on the device | 0.430 | 0.792 | 1.702 |
+| current | Warmup of at least 500 ms; no change to the CUDA code | 0.415 | 0.705 | 1.641 |
 
-The M4 run reported speedups of 3.96x, 7.55x and 10.53x. Those were against the single-threaded backend, the only baseline at the time.
+The M4 run reported speedups of 3.96x, 7.55x and 10.53x. Those were against the single-threaded backend, the only baseline at the time, and in a tight loop.
 
 ### Reproduce
 
