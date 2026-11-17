@@ -71,16 +71,11 @@ class Filter {
   // Filters points read in place from a strided buffer. `out` is replaced.
   // Throws std::invalid_argument when the view is malformed (see validate(const CloudView&)).
   // Not thread-safe; reuse one instance per stream.
-  virtual FilterStats apply(const CloudView& in, std::vector<PointXYZ>& out) {
-    // Temporary until the backends read strided input: packed xyz only.
-    validate(in);
-    if (in.stride != sizeof(PointXYZ) || in.x_offset != 0 || in.y_offset != 4 || in.z_offset != 8) {
-      throw std::logic_error("strided input is not implemented yet");
-    }
-    return apply(reinterpret_cast<const PointXYZ*>(in.data), in.count, out);
-  }
+  virtual FilterStats apply(const CloudView& in, std::vector<PointXYZ>& out) = 0;
   // Convenience for packed points. `in` may be null when n == 0.
-  virtual FilterStats apply(const PointXYZ* in, std::size_t n, std::vector<PointXYZ>& out) = 0;
+  FilterStats apply(const PointXYZ* in, std::size_t n, std::vector<PointXYZ>& out) {
+    return apply(as_view(in, n), out);
+  }
   // Per-stage timings of the last non-empty apply() call, in pipeline order. Empty on backends
   // that do not measure stages (CPU).
   virtual std::vector<StageTime> last_stage_times() const { return {}; }
@@ -93,9 +88,17 @@ std::unique_ptr<Filter> make_cpu_filter(const FilterParams& params);
 std::unique_ptr<Filter> make_cpu_omp_filter(const FilterParams& params, int threads = 0);
 // Number of threads OpenMP uses by default on this machine.
 int default_cpu_threads();
+// How the CUDA backend gets a strided cloud onto the device.
+enum class CudaInput {
+  kAuto,    // the measured best: same as kRaw (data in docs/DESIGN.md, "Input path")
+  kRaw,     // upload the bytes as they are and read x, y, z by offset on the device; layouts
+            // that are not 4-byte aligned are repacked, since the device cannot read them
+  kRepack,  // gather x, y, z into a packed host buffer first, then upload 12 bytes per point
+};
 // `reserve_points` sizes the preallocated device buffers; larger clouds grow them once.
 // Throws std::runtime_error when built without CUDA or when no device is usable.
-std::unique_ptr<Filter> make_cuda_filter(const FilterParams& params, std::size_t reserve_points);
+std::unique_ptr<Filter> make_cuda_filter(const FilterParams& params, std::size_t reserve_points,
+                                         CudaInput input = CudaInput::kAuto);
 
 // True when the library was compiled with the CUDA backend (WITH_CUDA=ON).
 bool cuda_compiled();

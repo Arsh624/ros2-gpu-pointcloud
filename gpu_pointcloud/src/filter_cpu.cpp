@@ -35,7 +35,10 @@ class CpuFilter final : public Filter {
  public:
   explicit CpuFilter(const FilterParams& params) : params_(params) { validate(params_); }
 
-  FilterStats apply(const PointXYZ* in, std::size_t n, std::vector<PointXYZ>& out) override {
+  FilterStats apply(const CloudView& view, std::vector<PointXYZ>& out) override {
+    validate(view);
+    const std::size_t n = view.count;
+    const detail::PointReader in(view);
     if (n > std::numeric_limits<std::uint32_t>::max()) {
       throw std::length_error("cloud has more than 2^32 - 1 points");
     }
@@ -47,7 +50,7 @@ class CpuFilter final : public Filter {
     const double min_range = params_.min_range, max_range = params_.max_range;
     for (std::size_t i = 0; i < n; ++i) {
       std::uint64_t key;
-      switch (detail::classify(in[i], params_.voxel_size, min_range, max_range, key)) {
+      switch (detail::classify(in(i), params_.voxel_size, min_range, max_range, key)) {
         case detail::kKept: keyed_.emplace_back(key, static_cast<std::uint32_t>(i)); break;
         case detail::kNonFinite: ++stats.non_finite; break;
         case detail::kOutOfRange: ++stats.out_of_range; break;
@@ -61,7 +64,7 @@ class CpuFilter final : public Filter {
       double sx = 0.0, sy = 0.0, sz = 0.0;
       std::size_t count = 0;
       for (; i < keyed_.size() && keyed_[i].first == key; ++i, ++count) {
-        const PointXYZ& p = in[keyed_[i].second];
+        const PointXYZ p = in(keyed_[i].second);
         sx += p.x;
         sy += p.y;
         sz += p.z;
@@ -89,7 +92,7 @@ bool cuda_compiled() { return true; }
 #else
 bool cuda_compiled() { return false; }
 bool cuda_device_present() { return false; }
-std::unique_ptr<Filter> make_cuda_filter(const FilterParams&, std::size_t) {
+std::unique_ptr<Filter> make_cuda_filter(const FilterParams&, std::size_t, CudaInput) {
   throw std::runtime_error("gpu_pointcloud was built without CUDA (WITH_CUDA=OFF); use backend 'cpu'");
 }
 #endif
