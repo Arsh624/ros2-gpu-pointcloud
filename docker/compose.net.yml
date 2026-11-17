@@ -1,0 +1,39 @@
+# Network benchmark: publisher (talker) and listener in separate containers on one Docker bridge
+# network, plus a Zenoh router. Separate containers mean separate network and IPC namespaces, so
+# no shared-memory transport between talker and listener. Driven by scripts/net_bench.sh.
+# Middleware settings are left at their defaults here; the script passes RMW_IMPLEMENTATION (and
+# the Zenoh endpoints) per run.
+name: gpcnet
+
+x-node: &node
+  image: ros2-gpu-pointcloud:dev
+  init: true
+  working_dir: /ws
+  volumes:
+    - ..:/ws/src/ros2-gpu-pointcloud
+    - install:/ws/install          # built once by the talker, read by the listener
+  networks: [net]
+  command: sleep infinity
+
+services:
+  router:
+    image: ros2-gpu-pointcloud:dev
+    init: true
+    hostname: router
+    networks: [net]
+    environment:
+      RMW_IMPLEMENTATION: rmw_zenoh_cpp
+    command: ros2 run rmw_zenoh_cpp rmw_zenohd
+  talker:
+    <<: *node
+    hostname: talker
+  listener:
+    <<: *node
+    hostname: listener
+
+networks:
+  net:
+    driver: bridge
+
+volumes:
+  install:

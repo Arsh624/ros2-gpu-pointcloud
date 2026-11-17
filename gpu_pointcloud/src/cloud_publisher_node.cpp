@@ -3,7 +3,9 @@
 //
 // Parameters: width, height, rate (Hz), count (0 = until shut down), point_step (bytes per point,
 // 12 = packed xyz; larger values pad each point like a real sensor driver's xyz + extra fields),
-// wait_for_subscribers (do not start until this many subscribers are matched).
+// wait_for_subscribers (do not start until this many subscribers are matched), filter (publish the
+// cloud after the default CPU range + voxel filter instead of the raw cloud; the network benchmark's
+// "filtered" payload, without a second middleware hop inside the sending container).
 // On exit it logs how many messages it sent and the rate it actually achieved.
 #include <chrono>
 #include <cstdio>
@@ -15,6 +17,7 @@
 #include <sensor_msgs/msg/point_cloud2.hpp>
 
 #include "gpu_pointcloud/cloud_conv.hpp"
+#include "gpu_pointcloud/filter.hpp"
 #include "gpu_pointcloud/synthetic.hpp"
 
 int main(int argc, char** argv) {
@@ -26,17 +29,23 @@ int main(int argc, char** argv) {
   const std::int64_t count = node->declare_parameter("count", 0);  // 0 = publish until shut down
   const std::int64_t point_step = node->declare_parameter("point_step", 12);
   const std::int64_t wait_for = node->declare_parameter("wait_for_subscribers", 0);
+  const bool filter = node->declare_parameter("filter", false);
   if (point_step < 12) {
     RCLCPP_FATAL(node->get_logger(), "point_step must be at least 12");
     return 1;
   }
 
-  const auto cloud = gpu_pointcloud::make_synthetic_cloud(width, height);
+  auto cloud = gpu_pointcloud::make_synthetic_cloud(width, height);
+  if (filter) {
+    std::vector<gpu_pointcloud::PointXYZ> filtered;
+    gpu_pointcloud::make_cpu_filter({})->apply(cloud.data(), cloud.size(), filtered);
+    cloud.swap(filtered);
+  }
   sensor_msgs::msg::PointCloud2 msg;
   std_msgs::msg::Header header;
   header.frame_id = "camera";
   gpu_pointcloud::to_pointcloud2(cloud.data(), cloud.size(), header, msg);
-  msg.is_dense = false;  // the raw synthetic cloud contains NaN pixels
+  msg.is_dense = filter;  // the raw synthetic cloud contains NaN pixels; the filtered one does not
   if (point_step != 12) {
     // Same x, y, z fields at offsets 0, 4, 8, with filler bytes after them.
     msg.point_step = static_cast<std::uint32_t>(point_step);
