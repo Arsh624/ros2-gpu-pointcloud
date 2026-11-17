@@ -29,6 +29,28 @@ struct FilterStats {
   std::size_t out = 0;  // occupied voxels
 };
 
+// Throws std::invalid_argument unless voxel_size > 0, 0 <= min_range <= max_range, all finite.
+void validate(const FilterParams& params);
+
+// Packs the voxel index of `p` into a sortable key: 21 bits per axis, x in the high bits.
+// Returns false (key untouched) when an index is outside [-2^20, 2^20). `p` must be finite.
+bool voxel_key(const PointXYZ& p, float voxel_size, std::uint64_t& key);
+
+// Filters a cloud: drop non-finite points, keep min_range <= |p| <= max_range, then emit one
+// centroid per occupied voxel in ascending key order. See docs/DESIGN.md for exact semantics.
+class Filter {
+ public:
+  virtual ~Filter() = default;
+  // `out` is replaced. `in` may be null when n == 0. Not thread-safe; reuse one instance per stream.
+  virtual FilterStats apply(const PointXYZ* in, std::size_t n, std::vector<PointXYZ>& out) = 0;
+};
+
+// Both factories validate `params` and throw std::invalid_argument when they are bad.
+std::unique_ptr<Filter> make_cpu_filter(const FilterParams& params);
+// `reserve_points` sizes the preallocated device buffers; larger clouds grow them once.
+// Throws std::runtime_error when built without CUDA or when no device is usable.
+std::unique_ptr<Filter> make_cuda_filter(const FilterParams& params, std::size_t reserve_points);
+
 // True when the library was compiled with the CUDA backend (WITH_CUDA=ON).
 bool cuda_compiled();
 // True when a usable CUDA device is visible at run time. Always false without cuda_compiled().
