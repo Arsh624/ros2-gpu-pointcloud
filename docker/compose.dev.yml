@@ -13,6 +13,11 @@ services:
     gpus: all
     init: true
     working_dir: /ws
+    # Same-host ROS runs use Fast DDS shared memory with segments big enough for one cloud
+    # (docker/fastdds_shm_large.xml); each process takes 16 MB, more than Docker's 64 MB default allows.
+    shm_size: 1gb
+    environment:
+      FASTRTPS_DEFAULT_PROFILES_FILE: /ws/src/ros2-gpu-pointcloud/docker/fastdds_shm_large.xml
     volumes:
       - ..:/ws/src/ros2-gpu-pointcloud
     command: sleep infinity
