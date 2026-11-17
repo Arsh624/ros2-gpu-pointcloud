@@ -1,5 +1,20 @@
 # Changelog
 
+## v0.2.0 - 2026-11-17
+
+Networking: Fast DDS against rmw_zenoh between two containers on one Docker bridge network (`results/net.csv`).
+
+### Added
+- `latency_listener_node`: per-message latency (`now - header.stamp`) and payload size, CSV log and one summary line (p50, p99, max, msgs/s, MB/s); summary arithmetic in `latency_stats.hpp` with gtest cases.
+- `cloud_publisher_node filter:=true`: publishes the filtered cloud (34,654 points, 415,848 bytes) as the second payload.
+- `docker/compose.net.yml` (Zenoh router, talker, listener) and `scripts/net_bench.sh`.
+
+### Results
+- Raw 640x480 cloud (3,686,400 bytes), Fast DDS defaults: 37.4% dropped at 10 Hz, 32.5% at 30 Hz. Filtered cloud: 13.3% and 24.9%.
+- Zenoh defaults: 0% dropped in every configuration; raw cloud p50 4.283 ms at 10 Hz and 4.002 ms at 30 Hz (110.59 MB/s).
+- Fast DDS with `FASTDDS_BUILTIN_TRANSPORTS=LARGE_DATA` (the one tuned configuration): 0% dropped; raw cloud p50 4.154 and 4.136 ms.
+- Single host, Docker bridge network, separate network namespaces (no shared memory), same clock at both ends; not a real LAN.
+
 ## v0.1.0 - 2026-11-17
 
 First release: the filter, its three backends, the ROS 2 node and the benchmarks. Measured on an RTX 4070 Laptop GPU and an i9-14900HX under Docker on WSL2; every number below is in `results/`.

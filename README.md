@@ -13,6 +13,7 @@ It comes with benchmarks of the bare filter and of the running node, measured on
 - **Profiled, changed, measured again:** the host-to-device copy was the largest CUDA stage. Removing a staging copy cut the 1280x720 end-to-end time from 2.356 to 1.641 ms. ([stages.csv](results/stages.csv), [history](results/history))
 - **The GPU's power management decides the result at camera rates:** after 100 ms of idle a 1280x720 CUDA call takes 6.96 ms instead of 1.49 ms. ([idle_gap.csv](results/idle_gap.csv))
 - **In a tight loop CUDA beats the best CPU baseline (OpenMP, 20 threads) only at larger clouds:** 0.59x at 320x240, 1.30x at 640x480, 1.76x at 1280x720, end to end. ([bench.csv](results/bench.csv))
+- **Across containers, Fast DDS with defaults dropped 37.4% of 3.7 MB clouds at 10 Hz; Zenoh dropped none** (p50 4.28 ms). Fast DDS's `LARGE_DATA` mode also delivered everything (p50 4.15 ms). Single host, Docker bridge network. ([net.csv](results/net.csv))
 - **Parity:** every backend returns the same voxel count; centroids agree within 1e-4 m per axis (tested), and were identical on every tested cloud.
 
 ## How it works
@@ -89,6 +90,12 @@ docker exec gpc-dev /ros_entrypoint.sh bash /ws/src/ros2-gpu-pointcloud/scripts/
 docker exec gpc-dev /ros_entrypoint.sh bash /ws/src/ros2-gpu-pointcloud/scripts/node_bench.sh
 ```
 
+Network benchmark (runs on the host and starts its own containers from `docker/compose.net.yml`; the committed run also included the tuned Fast DDS configuration, about 28 minutes):
+
+```bash
+RMWS="rmw_fastrtps_cpp rmw_zenoh_cpp rmw_fastrtps_cpp+LARGE_DATA" bash scripts/net_bench.sh
+```
+
 The before/after plot (matplotlib on the host):
 
 ```bash
@@ -101,7 +108,7 @@ python3 scripts/plot_before_after.py build_tmp/cloud_320x240_input.xyz build_tmp
 
 ## Results
 
-Environment: NVIDIA GeForce RTX 4070 Laptop GPU (driver 616.64, CUDA 12.6), Intel Core i9-14900HX with 20 logical CPUs visible to the container, PCL 1.14.0, Fast DDS 2.14.7, Docker on WSL2 (kernel 5.15.167.4), laptop on AC power. Synthetic depth-camera clouds: 320x240 (76,800 points), 640x480 (307,200) and 1280x720 (921,600), packed xyz (12 bytes per point).
+Environment: NVIDIA GeForce RTX 4070 Laptop GPU (driver 616.64, CUDA 12.6), Intel Core i9-14900HX with 20 logical CPUs visible to the container, PCL 1.14.0, Fast DDS 2.14.7, rmw_zenoh_cpp 0.2.13, Docker on WSL2 (kernel 5.15.167.4), laptop on AC power. Synthetic depth-camera clouds: 320x240 (76,800 points), 640x480 (307,200) and 1280x720 (921,600), packed xyz (12 bytes per point).
 
 ### 1. Inside the ROS node: latency and CPU cost per frame
 
@@ -220,7 +227,32 @@ Earlier runs are kept in [results/history](results/history). CUDA end-to-end med
 
 The first benchmark reported 3.96x, 7.55x and 10.53x. Those were against the single-threaded backend, the only baseline at the time, in a tight loop.
 
-### 5. Parity
+### 5. Networking: Fast DDS against Zenoh across containers
+
+`scripts/net_bench.sh` publishes the 640x480 cloud from one container and receives it in another, on one Docker bridge network, with a Zenoh router in a third container ([results/net.csv](results/net.csv)). Separate containers have separate network and IPC namespaces, so neither middleware can use shared memory. Both ends read the host's clock, so latency is `now - header.stamp` at the listener with no clock-sync error. 2020 messages per row; the first 20 are counted but left out of the latency statistics. Latency columns cover delivered messages only. Payloads: the raw cloud (3,686,400 bytes) and the same cloud after the default filter (34,654 points, 415,848 bytes). Fast DDS 2.14.7, rmw_zenoh_cpp 0.2.13.
+
+| Middleware | Payload | Rate Hz | Sent | Received | Dropped | p50 ms | p99 ms | max ms | MB/s received |
+|---|---|---:|---:|---:|---:|---:|---:|---:|---:|
+| Fast DDS, defaults | raw, 3.69 MB | 10 | 2020 | 1265 | 37.4% | 6.400 | 9.729 | 10.206 | 23.11 |
+| Fast DDS, defaults | raw, 3.69 MB | 30 | 2020 | 1363 | 32.5% | 4.496 | 8.751 | 9.965 | 74.91 |
+| Fast DDS, defaults | filtered, 0.42 MB | 10 | 2020 | 1751 | 13.3% | 1.104 | 1.938 | 2.708 | 3.61 |
+| Fast DDS, defaults | filtered, 0.42 MB | 30 | 2020 | 1518 | 24.9% | 0.689 | 1.516 | 2.037 | 9.41 |
+| Zenoh, defaults | raw, 3.69 MB | 10 | 2020 | 2020 | 0.0% | 4.283 | 7.863 | 8.591 | 36.86 |
+| Zenoh, defaults | raw, 3.69 MB | 30 | 2020 | 2020 | 0.0% | 4.002 | 7.101 | 8.078 | 110.59 |
+| Zenoh, defaults | filtered, 0.42 MB | 10 | 2020 | 2020 | 0.0% | 0.873 | 1.951 | 2.288 | 4.16 |
+| Zenoh, defaults | filtered, 0.42 MB | 30 | 2020 | 2020 | 0.0% | 0.919 | 1.896 | 2.476 | 12.48 |
+| Fast DDS, LARGE_DATA (tuned) | raw, 3.69 MB | 10 | 2020 | 2020 | 0.0% | 4.154 | 7.984 | 10.345 | 36.86 |
+| Fast DDS, LARGE_DATA (tuned) | raw, 3.69 MB | 30 | 2020 | 2020 | 0.0% | 4.136 | 7.174 | 7.844 | 110.59 |
+| Fast DDS, LARGE_DATA (tuned) | filtered, 0.42 MB | 10 | 2020 | 2020 | 0.0% | 0.899 | 1.987 | 2.335 | 4.16 |
+| Fast DDS, LARGE_DATA (tuned) | filtered, 0.42 MB | 30 | 2020 | 2020 | 0.0% | 0.897 | 1.958 | 2.279 | 12.48 |
+
+- **With defaults, Fast DDS loses a third of the raw clouds** (37.4% at 10 Hz, 32.5% at 30 Hz) and 13 to 25% of the filtered ones. Zenoh, also with defaults (only the router address and a non-loopback listen endpoint set), delivered every message.
+- **Where both deliver everything, they are level**: raw cloud p50 4.28 / 4.00 ms on Zenoh against 4.15 / 4.14 ms on Fast DDS with `LARGE_DATA`, at 10 / 30 Hz. Filtering before sending cuts the latency to under 1 ms and the bandwidth by 8.9x.
+- **The one tuned configuration** is Fast DDS's built-in `LARGE_DATA` mode (`FASTDDS_BUILTIN_TRANSPORTS=LARGE_DATA`, data over TCP). It was added only because the defaults dropped messages. The UDP losses fit the Docker VM's 208 KB socket buffer cap (`net.core.rmem_max`), which was left alone.
+- The Fast DDS default rows' lower latencies at 30 Hz (filtered 0.689 ms) cover only the messages that arrived, so they do not mean Fast DDS was faster.
+- **Single host, Docker bridge network: not a real LAN.** A two-machine test is future work.
+
+### 6. Parity
 
 CPU, OpenMP and CUDA must return the same voxel count exactly and every centroid within **1e-4 m per axis**. `test_parity_cuda` checks this on all three resolutions with voxel sizes 0.02, 0.05 and 0.1 m, plus the edge cases (NaN and Inf, exact range boundaries, negative coordinates on voxel boundaries, index overflow, a cloud larger than the reserved buffers). The measured difference was 0 m on every tested cloud: both compilers have floating-point contraction disabled so voxel keys match bit for bit, and sums are in double.
 
@@ -238,7 +270,7 @@ CPU, OpenMP and CUDA must return the same voxel count exactly and every centroid
 - **The CUDA backend's host thread spins while waiting** (one full core per frame in the node); a blocking wait was not tried.
 - **The OpenMP backend's long tails inside the node were not explained.**
 - **The PCL baseline does not time its point-type conversions**, which favours PCL.
-- **Networking (Fast DDS against Zenoh across containers) is not measured yet**; when it is, it will be on one host over a Docker bridge network, not a real LAN.
+- **Networking was measured on one host**, between containers on a Docker bridge network, not over a real LAN; a two-machine test is future work ([#19](https://github.com/Arsh624/ros2-gpu-pointcloud/issues/19)). Only one Fast DDS tuning (`LARGE_DATA`) and no Zenoh tuning was tried.
 
 ## Tests and CI
 
