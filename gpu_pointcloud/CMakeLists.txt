@@ -60,6 +60,12 @@ if(NOT CORE_ONLY)
   find_package(sensor_msgs REQUIRED)
   find_package(std_msgs REQUIRED)
 
+  add_library(gpu_pointcloud_conv STATIC src/cloud_conv.cpp)
+  set_target_properties(gpu_pointcloud_conv PROPERTIES POSITION_INDEPENDENT_CODE ON)
+  target_compile_options(gpu_pointcloud_conv PRIVATE -Wall -Wextra -Wpedantic)
+  target_link_libraries(gpu_pointcloud_conv PUBLIC gpu_pointcloud_core)
+  ament_target_dependencies(gpu_pointcloud_conv PUBLIC sensor_msgs std_msgs)
+
 
   install(DIRECTORY include/ DESTINATION include)
   install(TARGETS gpu_pointcloud_core
@@ -71,6 +77,8 @@ if(NOT CORE_ONLY)
     find_package(ament_cmake_gtest REQUIRED)
     ament_add_gtest(test_filter_cpu test/test_filter_cpu.cpp)
     target_link_libraries(test_filter_cpu gpu_pointcloud_core)
+    ament_add_gtest(test_cloud_conv test/test_cloud_conv.cpp)
+    target_link_libraries(test_cloud_conv gpu_pointcloud_conv)
   endif()
 
   ament_package()
