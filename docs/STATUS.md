@@ -157,3 +157,22 @@ Not started. Each has a GitHub issue with the exact task and acceptance criteria
 ## Next session
 
 M5 to M7 are not started. Start with M5 using the Zenoh config recorded under M0. `cloud_publisher_node` already exists; it still needs the latency listener, a `compose.net.yml` and `scripts/net_bench.sh`.
+
+## Rigor pass (after M4)
+
+Priority changed after M4: strengthen the evidence before adding features. Items, each its own PR:
+
+| Item | State | PR | Key result |
+|---|---|---|---|
+| A. PCL and OpenMP CPU baselines (#8, #9) | in review | | Best CPU is OpenMP on 20 threads. CUDA end-to-end vs best CPU: 0.55x / 0.86x / 1.12x at 320x240 / 640x480 / 1280x720. GPU-only: 1.04x / 2.39x / 4.64x |
+| B. Fix the input copy bottleneck (#5) | next | | |
+| C. Explain the CUDA p99 tail at 1280x720 | pending | | |
+| D. Node-level latency and max sustainable rate | pending | | |
+| E. M5 Fast DDS vs Zenoh (#10) | pending | | |
+| F. M6 README rewrite (#11), M7 release (#12) | pending | | |
+
+Notes for whoever continues:
+
+- Build with `colcon build --cmake-args -DWITH_PCL=ON` in the dev container; `scripts/bench.sh` expects the PCL baseline.
+- Earlier benchmark runs live in `results/history/<name>/`. Move the current `results/*.csv`, `bench.md` and `env.txt` there before a run that changes the code under test, and add a row to the README history table.
+- Item B starts from `results/stages.csv`: `h2d_copy` is 1.62 ms of the 2.36 ms end-to-end at 1280x720.

@@ -41,6 +41,6 @@ rm -f "$tmp"
 
 echo
 echo "OpenMP thread sweep (median ms):"
-column -s, -t "$out/cpu_omp_threads.csv" | awk '{print $1, $2, $6}' | column -t
+awk -F, '{print $1, $2, $6}' "$out/cpu_omp_threads.csv"
 echo
 cat "$out/env.txt"

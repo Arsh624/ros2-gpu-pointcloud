@@ -113,3 +113,44 @@ SKIPPED: profile.sqlite does not contain GPU memory data.
 ```
 
 So `results/nsys_summary.txt` shows host-side durations only. A host-side NVTX range around an asynchronous launch measures the launch, not the work: the `sort` range is short because the sort's GPU time is paid inside the next range that synchronises. For stage costs use `results/stages.csv`, which comes from cudaEvents recorded on the stream and is therefore on the GPU clock.
+
+## CPU baselines
+
+The benchmark has three CPU rows so the CUDA numbers are judged against the strongest one.
+
+| Baseline | What it is | Notes |
+|---|---|---|
+| `cpu` | This repository's single-threaded filter | The semantic reference |
+| `cpu_omp` | The same algorithm on OpenMP | Bit-identical to `cpu` at any thread count (tested at 1, 2, 7 and 32) |
+| `pcl` | Radial range loop + `pcl::VoxelGrid` (PCL 1.14), single-threaded | Built only with `-DWITH_PCL=ON` |
+
+### OpenMP backend
+
+1. Classify points in parallel over fixed chunks.
+2. Compact the kept (key, index) pairs in input order, using per-chunk counts and a prefix sum.
+3. Sort with `__gnu_parallel::sort` (libstdc++ parallel mode, a multiway mergesort on OpenMP).
+4. Reduce in parallel: the sorted array is cut into one slice per thread, each cut moved forward to the next run start so no voxel is split, then each thread averages its runs into a precomputed output offset.
+
+The pairs are unique, so the sort order is total and the summation order inside a voxel is the input order, as in the serial backend. The loops run over chunk numbers rather than thread ids, so the result does not depend on how many threads the runtime grants.
+
+`results/cpu_omp_threads.csv` holds a thread sweep under the benchmark protocol. On the test machine the container sees 20 logical CPUs and 20 threads was fastest at all three resolutions.
+
+### PCL baseline and how its semantics differ
+
+PCL has no radial range filter (`pcl::CropBox` is a box, `pcl::PassThrough` is one axis), so the baseline uses the plain loop a PCL user would write: drop non-finite points and points outside `[min_range, max_range]`, then `pcl::VoxelGrid` with a cubic leaf of `voxel_size`. The conversions between our point type and `pcl::PointXYZ` are outside the timed region, which favours PCL.
+
+Differences from our filter, from reading `voxel_grid.hpp` and from the comparison test:
+
+- **Same lattice.** `VoxelGrid` computes `floor(coord * inverse_leaf_size)`, a grid anchored at the origin like ours. It multiplies by a reciprocal where we divide, so a point on a voxel face can fall on the other side.
+- **Float centroids.** PCL accumulates in float; we accumulate in double.
+- **Different output order.** PCL sorts by a linear index with z most significant; we emit ascending key order with x most significant.
+- **`min_points_per_voxel`** defaults to 0, so every occupied voxel is emitted, like ours.
+- **Index overflow.** PCL refuses to filter when the grid's bounding box has more than 2^31 cells; we use 21 bits per axis independent of the bounding box.
+
+Measured on the synthetic clouds at 3 resolutions x voxel sizes {0.02, 0.05, 0.1} (`test_pcl_baseline`):
+
+- Voxel counts are equal in all nine cases.
+- Every voxel we emit is also occupied in PCL's result.
+- Centroids agree to within 5e-6 m in seven cases. In the two largest clouds at voxel 0.02 the worst difference is 1e-2 m and 4e-3 m. That is the size expected when a boundary point is assigned to the neighbouring voxel, which fits the reciprocal-multiply difference, but the cause was not traced point by point.
+
+Because of these differences the test does not demand parity with PCL. It requires the counts to agree within 1% and at least 99% of our voxels to be occupied in PCL's result, which is enough to say the two do comparable work.

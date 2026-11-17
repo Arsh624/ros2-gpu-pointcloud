@@ -8,6 +8,7 @@ One ament_cmake package, `gpu_pointcloud`, in two layers.
 |---|---|
 | `include/gpu_pointcloud/filter.hpp` | Point type, parameters, the `Filter` interface and backend factories |
 | `src/filter_cpu.cpp` | Single-threaded reference backend |
+| `src/filter_cpu_omp.cpp` | OpenMP backend, bit-identical to the reference |
 | `src/filter_cuda.cu` | CUDA backend, built only with `WITH_CUDA=ON` |
 | `include/gpu_pointcloud/detail/voxel_math.hpp` | Per-point classification (finite, range, voxel key) compiled for both host and device |
 | `include/gpu_pointcloud/synthetic.hpp`, `src/synthetic.cpp` | Deterministic synthetic depth-camera cloud |
@@ -42,3 +43,4 @@ Tests and the benchmark link only this library, so they run without a ROS graph.
 | `test/test_filter_cpu.cpp` | The cases on the CPU backend, voxel key packing, synthetic scene determinism |
 | `test/test_cloud_conv.cpp` | PointCloud2 conversion, including clouds it must reject |
 | `test/test_parity_cuda.cpp` | The cases on the CUDA backend and CPU-vs-CUDA parity; skipped without a GPU |
+| `test/test_pcl_baseline.cpp` | Checks the PCL baseline does comparable work (`WITH_PCL=ON` only) |
