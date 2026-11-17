@@ -32,6 +32,11 @@ struct FilterStats {
   double device_ms = 0.0;
 };
 
+struct StageTime {
+  const char* name;
+  double ms;
+};
+
 // Throws std::invalid_argument unless voxel_size > 0, 0 <= min_range <= max_range, all finite.
 void validate(const FilterParams& params);
 
@@ -46,6 +51,9 @@ class Filter {
   virtual ~Filter() = default;
   // `out` is replaced. `in` may be null when n == 0. Not thread-safe; reuse one instance per stream.
   virtual FilterStats apply(const PointXYZ* in, std::size_t n, std::vector<PointXYZ>& out) = 0;
+  // Per-stage timings of the last non-empty apply() call, in pipeline order. Empty on backends
+  // that do not measure stages (CPU).
+  virtual std::vector<StageTime> last_stage_times() const { return {}; }
 };
 
 // Both factories validate `params` and throw std::invalid_argument when they are bad.

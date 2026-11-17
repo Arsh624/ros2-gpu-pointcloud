@@ -52,6 +52,10 @@ if(WITH_CUDA)
   target_link_libraries(gpu_pointcloud_core PUBLIC CUDA::cudart)
 endif()
 
+add_executable(bench_filter bench/bench_filter.cpp)
+target_compile_options(bench_filter PRIVATE -Wall -Wextra -Wpedantic -O3)
+target_link_libraries(bench_filter gpu_pointcloud_core)
+
 message(STATUS "gpu_pointcloud: WITH_CUDA=${WITH_CUDA} CORE_ONLY=${CORE_ONLY}")
 
 if(NOT CORE_ONLY)
@@ -74,7 +78,7 @@ if(NOT CORE_ONLY)
   endforeach()
   target_sources(pointcloud_filter_node PRIVATE src/filter_node.cpp)
   target_sources(cloud_publisher_node PRIVATE src/cloud_publisher_node.cpp)
-  install(TARGETS pointcloud_filter_node cloud_publisher_node RUNTIME DESTINATION lib/${PROJECT_NAME})
+  install(TARGETS pointcloud_filter_node cloud_publisher_node bench_filter RUNTIME DESTINATION lib/${PROJECT_NAME})
 
   install(DIRECTORY include/ DESTINATION include)
   install(TARGETS gpu_pointcloud_core

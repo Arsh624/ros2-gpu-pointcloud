@@ -1,0 +1,46 @@
+# nsys stats for: bench_filter --backend cuda --res 640x480 --iters 50 (20 warmup iterations included)
+Generating SQLite file profile.sqlite from profile.nsys-rep
+Processing [profile.sqlite] with [/opt/nvidia/nsight-systems/2024.5.1/host-linux-x64/reports/nvtx_sum.py]... 
+
+ ** NVTX Range Summary (nvtx_sum):
+
+ Time (%)  Total Time (ns)  Instances  Avg (ns)  Med (ns)  Min (ns)  Max (ns)  StdDev (ns)   Style                  Range               
+ --------  ---------------  ---------  --------  --------  --------  --------  -----------  -------  -----------------------------------
+     37.6         30199530         70  431421.9  427299.5    395590    546890      25797.1  PushPop  :classify+select                   
+     22.9         18360013         70  262285.9  252497.0    220556    362236      34309.5  PushPop  :h2d                               
+     13.7         10969860         70  156712.3  144817.0    117480    295785      35875.6  PushPop  :reduce_by_key                     
+     10.5          8451180         70  120731.1  112773.0    101533    204478      21150.4  PushPop  :d2h                               
+      5.8          4645973         70   66371.0   59503.0     39712    284403      32146.5  PushPop  :sort                              
+      5.7          4538702         70   64838.6   58267.5     38553    282251      31974.6  PushPop  CCCL:cub::DeviceRadixSort          
+      1.3          1044279         70   14918.3   13771.0     11363     63333       6171.2  PushPop  CCCL:cub::DeviceSelect::Flagged    
+      1.2           966805         70   13811.5   13230.0      8846     69254       6935.4  PushPop  CCCL:cub::DeviceReduce::ReduceByKey
+      0.8           618463         70    8835.2    5911.0      5147     50973       7402.1  PushPop  :gather_keys                       
+      0.6           475839         70    6797.7    5496.0      4724     24351       3237.0  PushPop  :centroid                          
+
+Processing [profile.sqlite] with [/opt/nvidia/nsight-systems/2024.5.1/host-linux-x64/reports/cuda_gpu_kern_sum.py]... 
+SKIPPED: profile.sqlite does not contain CUDA kernel data.
+
+Processing [profile.sqlite] with [/opt/nvidia/nsight-systems/2024.5.1/host-linux-x64/reports/cuda_gpu_mem_time_sum.py]... 
+SKIPPED: profile.sqlite does not contain GPU memory data.
+
+Processing [profile.sqlite] with [/opt/nvidia/nsight-systems/2024.5.1/host-linux-x64/reports/cuda_api_sum.py]... 
+
+ ** CUDA API Summary (cuda_api_sum):
+
+ Time (%)  Total Time (ns)  Num Calls   Avg (ns)    Med (ns)   Min (ns)  Max (ns)  StdDev (ns)           Name         
+ --------  ---------------  ---------  ----------  ----------  --------  --------  -----------  ----------------------
+     60.8         96515659          1  96515659.0  96515659.0  96515659  96515659          0.0  cudaStreamCreate      
+     25.9         41087100        212    193807.1    123116.0      2912    452632     136198.7  cudaStreamSynchronize 
+      3.1          4957009        910      5447.3      4619.0      2180     79607       4497.1  cudaLaunchKernel      
+      3.0          4784582          3   1594860.7   1581009.0   1522038   1681535      80645.7  cudaHostAlloc         
+      1.6          2527322        280      9026.1      6206.0      3206     70062       6474.9  cudaMemcpyAsync       
+      1.5          2383022        490      4863.3      4317.5      1337     45180       3736.0  cudaMemsetAsync       
+      1.2          1841919         19     96943.1      2491.0       144    554616     148631.1  cudaFree              
+      1.1          1780028        630      2825.4      2801.5      1266     18401       1691.8  cudaEventRecord       
+      1.0          1564019         10    156401.9    204630.5      1947    282134     111594.6  cudaMalloc            
+      0.8          1209975          5    241995.0    273771.0       161    512673     236583.4  cudaFreeHost          
+      0.0             7000          9       777.8       256.0       240      3344       1102.5  cudaEventCreate       
+      0.0             6201          1      6201.0      6201.0      6201      6201          0.0  cudaStreamDestroy     
+      0.0             5872          9       652.4       213.0       179      3990       1254.4  cudaEventDestroy      
+      0.0              806          1       806.0       806.0       806       806          0.0  cuModuleGetLoadingMode
+

@@ -87,3 +87,29 @@ Decisions:
 ```
 
 The two errors in its summary are these start-up errors, not memory errors: the tool never attached to the device. The CUDA code has therefore **not** been checked by compute-sanitizer. Running it on native Linux, or after enabling the Windows debugger interface, is tracked in [issue #3](https://github.com/Arsh624/ros2-gpu-pointcloud/issues/3).
+
+## Benchmark methodology
+
+`bench_filter` (no ROS) runs each resolution and backend for 20 warmup iterations and 200 timed iterations on the same synthetic cloud, with one filter instance per run so buffers are already allocated.
+
+| Timing | Clock | Covers |
+|---|---|---|
+| cpu / end_to_end | `std::chrono::steady_clock` around `apply` | The whole CPU filter |
+| cuda / end_to_end | `std::chrono::steady_clock` around `apply` | Host input to host output: copy into pinned memory, H2D, device pipeline, D2H, final stream synchronisation, copy into the output vector |
+| cuda / gpu_only | cudaEvents (`FilterStats::device_ms`) | Device pipeline between the two transfers, including the two small host syncs |
+| per stage | cudaEvents at each stage boundary | One interval per stage; `h2d_copy` also contains the host `memcpy` into the pinned buffer, and the two `host_sync+...` stages contain the host round trip |
+
+Reported statistics are the median and the nearest-rank 99th percentile. Speedup is CPU median divided by CUDA median. Input points per second is the input size divided by the median time.
+
+Sanity checks applied before publishing numbers: CPU time per point is roughly constant across resolutions (24 to 28 ns per point in the committed run), GPU-only time is below end-to-end time at every size, and the per-stage medians add up to about the end-to-end median.
+
+## Profiling under WSL2
+
+`scripts/profile.sh` runs `nsys profile -t cuda,nvtx`. In this environment (Docker on WSL2) Nsight Systems records the NVTX ranges and the CUDA API calls, but no GPU-side data:
+
+```
+SKIPPED: profile.sqlite does not contain CUDA kernel data.
+SKIPPED: profile.sqlite does not contain GPU memory data.
+```
+
+So `results/nsys_summary.txt` shows host-side durations only. A host-side NVTX range around an asynchronous launch measures the launch, not the work: the `sort` range is short because the sort's GPU time is paid inside the next range that synchronises. For stage costs use `results/stages.csv`, which comes from cudaEvents recorded on the stream and is therefore on the GPU clock.

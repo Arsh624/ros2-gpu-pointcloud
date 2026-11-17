@@ -22,6 +22,8 @@ Tests and the benchmark link only this library, so they run without a ROS graph.
 | `src/filter_node.cpp` | `pointcloud_filter_node`: subscribes `input`, publishes `output`, parameter `backend: cpu|cuda` |
 | `src/cloud_publisher_node.cpp` | `cloud_publisher_node`: publishes the synthetic cloud on `cloud` at a fixed rate |
 
+
+
 ## Build switches
 
 - `WITH_CUDA` (default ON when a CUDA compiler is found): compiles the CUDA backend. Without it, asking for the CUDA backend fails with a clear error.
