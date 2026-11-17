@@ -1,0 +1,18 @@
+# Dev container. Usage (from repo root):
+#   docker compose -f docker/compose.dev.yml up -d --build
+#   docker exec gpc-dev bash -lc "colcon build ..."
+name: gpc
+
+services:
+  dev:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile
+    image: ros2-gpu-pointcloud:dev
+    container_name: gpc-dev
+    gpus: all
+    init: true
+    working_dir: /ws
+    volumes:
+      - ..:/ws/src/ros2-gpu-pointcloud
+    command: sleep infinity
