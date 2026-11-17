@@ -166,8 +166,8 @@ Priority changed after M4: strengthen the evidence before adding features. Items
 |---|---|---|---|
 | A. PCL and OpenMP CPU baselines (#8, #9) | done | [#13](https://github.com/Arsh624/ros2-gpu-pointcloud/pull/13) | Best CPU is OpenMP on 20 threads. CUDA end-to-end vs best CPU: 0.55x / 0.86x / 1.12x at 320x240 / 640x480 / 1280x720. GPU-only: 1.04x / 2.39x / 4.64x |
 | B. Fix the input copy bottleneck (#5) | done | [#14](https://github.com/Arsh624/ros2-gpu-pointcloud/pull/14) | CUDA end-to-end 0.442 / 0.998 / 2.356 ms -> 0.430 / 0.792 / 1.702 ms (main run); vs best CPU 0.57x / 1.11x / 1.63x. Over 7 launches 1280x720 is ~1.5 ms (5) or ~2.4 ms (2) |
-| C. Explain the CUDA p99 tail at 1280x720 | in review | | Environmental: GPU idles to P8 (210 MHz) during the CPU runs and needs ~250-320 ms to clock up; the tail was the first timed iterations. Benchmark warmup now also lasts 500 ms. With idle gaps CUDA 1280x720 is 3.0 ms at 30 Hz and 7.0 ms at 10 Hz (cpu_omp: 3.2 and 4.7 ms) |
-| D. Node-level latency and max sustainable rate | pending | | |
+| C. Explain the CUDA p99 tail at 1280x720 | done | [#15](https://github.com/Arsh624/ros2-gpu-pointcloud/pull/15) | Environmental: GPU idles to P8 (210 MHz) during the CPU runs and needs ~250-320 ms to clock up; the tail was the first timed iterations. Benchmark warmup now also lasts 500 ms. With idle gaps CUDA 1280x720 is 3.0 ms at 30 Hz and 7.0 ms at 10 Hz (cpu_omp: 3.2 and 4.7 ms) |
+| D. Node-level latency and CPU cost per frame | done | [#16](https://github.com/Arsh624/ros2-gpu-pointcloud/pull/16) | 1280x720 at 30 Hz: CUDA 3.48 ms on 0.96 cores, cpu_omp 12 threads 6.68 ms on 4.55 cores; at 10 Hz CUDA 11.07 ms (idle clock-down). Image lacked Fast DDS (nodes ran on Cyclone); with middleware defaults large clouds dropped in-container, fixed for node runs with `docker/fastdds_shm_large.xml` |
 | E. M5 Fast DDS vs Zenoh (#10) | pending | | |
 | F. M6 README rewrite (#11), M7 release (#12) | pending | | |
 
@@ -179,3 +179,81 @@ Notes for whoever continues:
 - The CUDA input stage has two speeds that are fixed per filter instance (about 0.93 or 1.74 ms at 1280x720). Host memory, CPU core, huge pages and the bare transfer call were ruled out; see `docs/DESIGN.md`, "Two transfer rates". Always compare CUDA variants inside one process (`bench_cuda_input`) or over several launches (`results/cuda_launches.csv`), never from two single launches.
 - Tight-loop numbers are not what a node gets. After an idle gap both backends are slower, the GPU much more so (`results/idle_gap.csv`, `docs/DESIGN.md` "Idle GPU"). Item D must measure at real publish rates (10 and 30 Hz), not only at the maximum rate, and should expect the OpenMP backend to win at 10 Hz on this laptop.
 - Do not run anything else in the container while a benchmark runs; the results are sensitive to GPU and CPU load.
+
+## Where this stopped, and exact next steps
+
+Item D is done. Next: F (README rewrite, release v0.1.0), then E. Everything below is what a new session needs; nothing else is in anyone's head.
+
+### Before anything else
+
+```
+docker compose -f docker/compose.dev.yml up -d
+docker exec gpc-dev /ros_entrypoint.sh bash -c 'cd /ws && colcon build --cmake-args -DWITH_PCL=ON && colcon test && colcon test-result'
+```
+
+Expect 81 tests, 0 failures, 1 skipped. From Git Bash on Windows set `MSYS_NO_PATHCONV=1` first. The container's `/ws/build` is lost when the container is recreated; the build takes about a minute.
+
+### Item D: done (PR #16)
+
+The two discarded runs were not caused by stale shared-memory files: a fresh container dropped just as much. Root cause and fix are in `docs/DESIGN.md`, "Middleware for same-host node runs". In short: the image had no Fast DDS, so the default RMW was Cyclone DDS; with defaults, best-effort clouds of 0.9 MB and more do not fit the UDP path (Docker VM `net.core.rmem_max = 212992`) or Fast DDS's 512 KB SHM segment. `node_bench.sh` now runs Fast DDS with `docker/fastdds_shm_large.xml` and warns if a row is missing messages. The image must be rebuilt once (`docker compose -f docker/compose.dev.yml build`) to get Fast DDS.
+
+### Item E: Fast DDS vs rmw_zenoh (issue #10)
+
+What already exists and can be reused as it is:
+
+- `cloud_publisher_node`: parameters `width`, `height`, `rate` (double), `count`, `point_step`, `wait_for_subscribers`; stamps `header.stamp = now()`; prints `publisher_summary sent=N achieved_hz=X requested_hz=Y` on exit.
+- `pointcloud_filter_node` with `latency_csv`: its `transport_ms` column is `now - header.stamp` at callback entry, so it already measures transport latency for the raw cloud.
+
+What has to be written:
+
+1. `gpu_pointcloud/src/latency_listener_node.cpp` (add to `CMakeLists.txt` next to the other nodes). Subscribes to `cloud` with `SensorDataQoS`. Parameters: `samples` (default 2000), `csv` (path), `expected_hz` (double). Per message record `latency_ms = now - header.stamp` and `bytes = data.size()`. After `samples` messages, or 10 s without a message, write the CSV (`latency_ms,bytes` per row) and print one summary line: `p50_ms p99_ms max_ms msgs_per_s mb_per_s received`. Then exit. Drops are `sent - received`, with `sent` from the publisher's summary line, so no sequence number is needed. Write it test-first where there is logic to test (the percentile and rate arithmetic belong in a small function with a gtest).
+2. `docker/compose.net.yml`: services `router`, `talker`, `listener`, all `image: ros2-gpu-pointcloud:dev`, on one bridge network, repo and a shared results directory mounted. They are separate containers, so separate network namespaces and no shared-memory transport. The binaries must exist in each container: either mount a prebuilt install directory, or run `colcon build` in each at start (slow). Mounting `/ws/install` from a named volume that the dev container also uses is the simplest.
+3. `scripts/net_bench.sh`: for RMW in {`rmw_fastrtps_cpp`, `rmw_zenoh_cpp`}, payload in {raw 640x480, filtered}, rate in {10, 30}: start the listener, start the publisher with `count` = 2000 + 50 and `wait_for_subscribers:=1`, collect the listener's summary and the publisher's `sent`. For the filtered payload run `pointcloud_filter_node` in the talker container between publisher and listener (publisher `cloud:=input`, listener `cloud:=output`). Write `results/net.csv` with columns `rmw,payload,rate_hz,bytes,sent,received,drop_pct,p50_ms,p99_ms,max_ms,msgs_per_s,mb_per_s`.
+
+Zenoh configuration, verified in M0 with `rmw_zenoh_cpp` 0.2.13 (the first attempt without the `listen` override discovered topics but delivered no data):
+
+```
+# router container
+RMW_IMPLEMENTATION=rmw_zenoh_cpp
+command: ros2 run rmw_zenoh_cpp rmw_zenohd
+
+# talker and listener containers
+RMW_IMPLEMENTATION=rmw_zenoh_cpp
+ZENOH_CONFIG_OVERRIDE='connect/endpoints=["tcp/router:7447"];listen/endpoints=["tcp/0.0.0.0:0"]'
+```
+
+For Fast DDS set `RMW_IMPLEMENTATION=rmw_fastrtps_cpp` and no other configuration. Expect heavy drops for the raw cloud: across containers there is no shared memory, and UDP is capped by the Docker VM's 208 KB `net.core.rmem_max` (item D). Report that as measured; the VM setting is outside this repo.
+
+Things already observed that will matter:
+
+- The raw cloud from `cloud_publisher_node` is 12 bytes per point: 3.69 MB at 640x480, not the 4.9 MB the brief assumed. Report the measured size. `point_step:=16` gives 4.9 MB if that payload is wanted as well.
+- Inside one container with the default RMW, `transport_ms` for the 3.7 MB cloud was already about 11 ms, and the publisher could not exceed about 96 Hz at 640x480 or about 33 Hz at 1280x720. Across containers it will be slower. Large best-effort messages may drop under Fast DDS defaults; report that as measured.
+- Pass `rate` as a double (`-p rate:=30.0`). An integer aborts the node with a parameter type error.
+
+Acceptance criteria for E:
+
+- `results/net.csv` committed, one row per configuration (2 RMWs x 2 payloads x 2 rates = 8 rows), produced by the script, with 2000 samples per row or the reason there are fewer.
+- README section stating: single host, Docker bridge network, separate network namespaces so no shared memory, same clock on both ends, not a real LAN, two-machine test is future work.
+- Default middleware settings first. At most one tuned configuration, clearly labelled, and only if the defaults drop messages.
+- PR with the script's real output in the body; issue #10 closed by it.
+
+### Item F: README rewrite (issue #11), then release (issue #12)
+
+The README already has the benchmark, idle-gap, bottleneck, p99 and node-latency sections with numbers from `results/`. What is missing:
+
+1. Two-line "what it is", then a mermaid diagram: sensor -> PointCloud2 -> `pointcloud_filter_node` (cpu | cpu_omp | cuda) -> output, and the CUDA stage pipeline from `docs/DESIGN.md`.
+2. Quick start with the exact commands for: build image, build and test, run the node with each backend, run `bench.sh`, run `node_bench.sh`, run `net_bench.sh`. Run every command once in the dev container before writing it down.
+3. A "Results" section led by, in this order: speedup against the best CPU baseline; node-level latency and CPU cost; the bottleneck story (profiled, changed, before and after); parity tolerance; limitations.
+4. Limitations, complete list: synthetic data only; laptop GPU under WSL2; GPU slows after idle (so results at 10 Hz differ from tight-loop results); two transfer rates per filter instance, cause unknown; compute-sanitizer not run (issue #3); nsys capture has no GPU kernel data; raw-versus-repack rule for wide points is provisional; rising-rate (max sustainable rate) sweep not run; networking on a single host.
+5. `results/before_after.png`: matplotlib scatter of the 320x240 cloud before and after filtering. Needs a way to dump a cloud, for example `bench_filter --dump FILE`. PNG only.
+6. `gh repo edit --description "<one line>" --add-topic ros2,cuda,cpp,robotics,point-cloud,zenoh`.
+
+Then M7: add a v0.1.0 section to `CHANGELOG.md` with numbers copied from `results/`, and `gh release create v0.1.0` (attach `results/profile.nsys-rep` if regenerated with `scripts/profile.sh`). The owner reads the README first.
+
+Rule for every number in the README: it must appear in a committed file under `results/`.
+
+### Open questions worth an hour each, in order of value
+
+1. The rising-rate sweep (`RATE_SWEEP=1 bash scripts/node_bench.sh`) was written but not run. It gives the maximum sustainable input rate per backend.
+2. Why the CUDA transfer stage has two speeds per filter instance (`docs/DESIGN.md`, "Two transfer rates"). Next thing to try: whether it follows the stream (create several streams in one process and time the same transfer on each).
+3. Whether the Windows "prefer maximum performance" GPU power mode removes the idle slowdown (owner must change it; then rerun `bench_idle_gap`).

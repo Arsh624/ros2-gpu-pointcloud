@@ -17,6 +17,13 @@ namespace gpu_pointcloud {
 // read outside `data`, or when the cloud is big-endian.
 void from_pointcloud2(const sensor_msgs::msg::PointCloud2& msg, std::vector<PointXYZ>& out);
 
+// Describes the points of `msg` in place, without copying, so a filter can read them straight
+// from the message buffer. Returns false when the cloud has row padding (row_step larger than
+// width * point_step with more than one row), which a single strided view cannot express; use
+// from_pointcloud2 for those. Throws std::invalid_argument in the same cases as
+// from_pointcloud2. The view is valid for as long as `msg` is alive and unchanged.
+bool pointcloud2_view(const sensor_msgs::msg::PointCloud2& msg, CloudView& view);
+
 // Writes an unorganized (height 1), dense, little-endian cloud with exactly the float32 fields
 // x, y, z (point_step 12) and the given header.
 void to_pointcloud2(const PointXYZ* points, std::size_t n, const std_msgs::msg::Header& header,

@@ -62,6 +62,37 @@ The cause on the GPU side is its power management. `nvidia-smi` reports the idle
 
 So on this laptop, **the GPU backend only pays off when it is kept busy**: at high frame rates, with large clouds, or when several streams share it. For one 640x480 camera at 10 to 30 Hz the OpenMP backend is the better choice here. A desktop or embedded GPU with different power management may behave differently; that has not been measured.
 
+### 3. Inside the ROS node: latency and CPU cost per frame
+
+`scripts/node_bench.sh` runs `pointcloud_filter_node` against `cloud_publisher_node` in one container, at 10 and 30 Hz, and logs every callback ([results/node_latency.csv](results/node_latency.csv)). 100 messages at 10 Hz and 300 at 30 Hz per row, after 20 start-up messages; every message arrived. "Callback" is callback entry to the return of `publish()` (PointCloud2 view, filter, output message). "CPU" is the CPU time of the whole node process (all threads) during the callback.
+
+| Backend | Resolution | 10 Hz callback p50 ms | 10 Hz p99 ms | 10 Hz CPU p50 ms | 10 Hz avg cores | 30 Hz callback p50 ms | 30 Hz p99 ms | 30 Hz CPU p50 ms | 30 Hz avg cores |
+|---|---|---:|---:|---:|---:|---:|---:|---:|---:|
+| cpu | 320x240 | 2.60 | 6.73 | 2.65 | 0.97 | 3.86 | 6.75 | 3.70 | 0.96 |
+| cpu | 640x480 | 12.04 | 16.71 | 11.57 | 0.96 | 10.15 | 14.80 | 9.77 | 0.96 |
+| cpu | 1280x720 | 27.47 | 32.99 | 26.42 | 0.96 | 27.09 | 34.63 | 26.06 | 0.97 |
+| cpu_omp, 12 threads | 320x240 | 1.19 | 14.06 | 1.23 | 4.08 | 1.03 | 1.70 | 1.05 | 1.41 |
+| cpu_omp, 12 threads | 640x480 | 4.03 | 11.54 | 4.47 | 4.53 | 2.34 | 9.76 | 2.31 | 2.59 |
+| cpu_omp, 12 threads | 1280x720 | 6.46 | 18.22 | 10.35 | 4.17 | 6.68 | 10.99 | 29.57 | 4.55 |
+| cpu_omp, 20 threads | 320x240 | 1.43 | 20.71 | 1.47 | 7.34 | 0.97 | 11.64 | 1.01 | 4.70 |
+| cpu_omp, 20 threads | 640x480 | 3.06 | 49.53 | 3.46 | 8.13 | 1.84 | 11.42 | 2.12 | 3.83 |
+| cpu_omp, 20 threads | 1280x720 | 7.17 | 19.18 | 65.21 | 9.03 | 5.10 | 11.21 | 11.76 | 6.14 |
+| cuda | 320x240 | 2.67 | 4.56 | 2.56 | 0.97 | 1.83 | 4.45 | 1.77 | 0.97 |
+| cuda | 640x480 | 2.90 | 6.99 | 2.79 | 0.97 | 2.50 | 7.13 | 2.41 | 0.97 |
+| cuda | 1280x720 | 11.07 | 13.58 | 10.65 | 0.96 | 3.48 | 12.09 | 3.35 | 0.96 |
+
+"Avg cores" is total CPU time over total callback time for the row; the CPU p50 column is the median of single callbacks, so the two do not divide into each other exactly.
+
+What this shows:
+
+- **CUDA costs one core, OpenMP costs four to nine.** At 1280x720 and 30 Hz, CUDA takes 3.48 ms per frame on 0.96 cores; OpenMP on 12 threads takes 6.68 ms on 4.55 cores. CUDA's CPU time equals its wall time, which fits the host thread spinning while it waits for the GPU (the CUDA runtime's default wait policy); a blocking wait was not tried.
+- **At 30 Hz CUDA is the fastest at 1280x720** (3.48 ms against 5.10 ms for the best OpenMP setting). At 640x480 OpenMP on 20 threads has the lower median (1.84 against 2.50 ms); CUDA has the lowest p99 at 640x480 at both rates (7.13 and 6.99 ms).
+- **At 10 Hz the GPU's idle clock-down shows up again**: CUDA 1280x720 goes from 3.48 ms at 30 Hz to 11.07 ms at 10 Hz (section 2 explains why).
+- **OpenMP tails are long inside a node.** Its p99 is between 10 and 50 ms in 10 of its 12 rows. The cause was not isolated; without ROS, section 2 already showed single OpenMP calls of 20 to 70 ms after an idle gap.
+- The single-threaded `cpu` backend needs 27 ms of the 33 ms frame budget at 1280x720 and 30 Hz.
+
+**Middleware setting used here.** Transport is not what this measures, so both processes use Fast DDS over shared memory with a segment large enough for one cloud ([docker/fastdds_shm_large.xml](docker/fastdds_shm_large.xml)). With middleware defaults most clouds of 0.9 MB and more were dropped in this container: Fast DDS's default 512 KB shared-memory segment is smaller than one sample, and the UDP path is limited by the Docker VM's 208 KB socket buffer cap. Middleware behaviour with defaults across containers is the subject of the networking comparison.
+
 ### All backends, back to back
 
 Median ms (99th percentile in brackets), from the main run:

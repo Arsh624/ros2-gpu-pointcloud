@@ -30,6 +30,12 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         libpcl-dev \
     && rm -rf /var/lib/apt/lists/*
 
+# Layer 6: Fast DDS, Jazzy's default RMW. ros-base installs without it under --no-install-recommends,
+# and the node then silently falls back to Cyclone DDS. Separate layer so the ones above stay cached.
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        ros-jazzy-rmw-fastrtps-cpp \
+    && rm -rf /var/lib/apt/lists/*
+
 RUN printf '%s\n' \
         '#!/bin/bash' \
         'set -e' \

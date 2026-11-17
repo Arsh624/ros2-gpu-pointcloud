@@ -38,6 +38,8 @@ Installed versions in the image built on 2026-11-16 (`dpkg -l`):
 | ros-jazzy-sensor-msgs | 5.3.8-1noble.20261105.060814 |
 | ros-jazzy-rmw-zenoh-cpp | 0.2.13-1noble.20261104.171211 |
 | ros-jazzy-rmw-cyclonedds-cpp | 2.2.4-1noble.20261105.063358 |
+| ros-jazzy-rmw-fastrtps-cpp | 8.4.5-1noble.20261105.065411 |
+| ros-jazzy-fastrtps (Fast DDS) | 2.14.7-1noble.20260911.035053 |
 | ros-jazzy-ament-cmake-gtest | 2.5.7-1noble.20261025.230436 |
 
 The base image is pinned by digest. The ROS packages come from the rolling Jazzy apt repository and are not pinned, so a rebuild on a later date may pick up newer patch versions.
@@ -257,3 +259,13 @@ The OpenMP backend has a smaller version of the same problem: its worker threads
 - `bench_filter --warmup-ms`: warmup lasts until both the iteration count and this time are reached. `scripts/bench.sh` uses 20 iterations and 500 ms. Checked by counting CUDA iterations above 5 ms over repeated all-backend runs: without it 2 of 6 runs had some (13 and 8), with it 0 of 8.
 - `bench_idle_gap` and its three result files, so the tight-loop numbers are not the only ones published.
 - A side effect worth knowing when comparing runs: with the longer warmup the GPU-only medians dropped (1280x720: 0.62 ms to 0.44 ms). The earlier runs were measuring a GPU that was not always fully clocked up.
+
+## Middleware for same-host node runs
+
+Found while running item D (`scripts/node_bench.sh`):
+
+- **The image had no Fast DDS.** `ros-jazzy-ros-base` installed with `--no-install-recommends` does not pull in `rmw_fastrtps_cpp`, so with `RMW_IMPLEMENTATION` unset the nodes ran on Cyclone DDS (`ros2 doctor --report` said `middleware name: rmw_cyclonedds_cpp`). The Dockerfile now installs `ros-jazzy-rmw-fastrtps-cpp` in its own layer, and Fast DDS is the default again.
+- **With defaults, large best-effort clouds are mostly dropped in one container.** 40 clouds published at 10 Hz, received by `pointcloud_filter_node` (SensorDataQoS): Cyclone DDS 0 of 40 at 640x480 (3.7 MB); Fast DDS 3 of 40 at 320x240 (0.9 MB) and 2 of 40 at 640x480; 64x48 clouds 40 of 40 on both. `FASTDDS_BUILTIN_TRANSPORTS=LARGE_DATA` did not help (2 to 9 of 40).
+- **Why.** The UDP path is capped by the Docker VM's socket buffer limit, `net.core.rmem_max = 212992` (208 KB), far below one cloud; this is a VM-wide kernel setting and was left alone. Fast DDS's shared-memory transport was in use (its segments appeared in `/dev/shm`), but its default segment is 512 KB, smaller than one sample.
+- **Fix for node runs.** `docker/fastdds_shm_large.xml`: shared memory only, 16 MB segment. With it, 40 of 40 at 320x240, 640x480 and 1280x720, at 10 and 30 Hz. A 32 MB segment failed to allocate: two processes need two segments and Docker's default `/dev/shm` is 64 MB.
+- This profile is used only where transport is not the thing measured. Across containers there is no shared memory, so the networking comparison (item E) has to start from middleware defaults and report drops as measured.

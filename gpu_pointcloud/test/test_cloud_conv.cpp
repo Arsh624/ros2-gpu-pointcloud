@@ -155,3 +155,67 @@ TEST(CloudConv, RejectsCloudsItCannotReadSafely) {
   big_endian.is_bigendian = true;
   EXPECT_THROW(gpu_pointcloud::from_pointcloud2(big_endian, got), std::invalid_argument);
 }
+
+// --- zero-copy views ---
+
+TEST(CloudConvView, DescribesThePointsInPlace) {
+  std::vector<PointXYZ> truth;
+  const PointCloud2 msg = make_xyzrgb(5, 1, &truth);
+  gpu_pointcloud::CloudView view;
+  ASSERT_TRUE(gpu_pointcloud::pointcloud2_view(msg, view));
+  EXPECT_EQ(view.data, msg.data.data());
+  EXPECT_EQ(view.count, 5u);
+  EXPECT_EQ(view.stride, 32u);
+  EXPECT_EQ(view.x_offset, 0u);
+  EXPECT_EQ(view.y_offset, 4u);
+  EXPECT_EQ(view.z_offset, 8u);
+
+  // Filtering through the view gives the same result as filtering the copied points.
+  gpu_pointcloud::FilterParams params;
+  params.min_range = 0.f;
+  params.max_range = 1000.f;
+  auto filter = gpu_pointcloud::make_cpu_filter(params);
+  std::vector<PointXYZ> from_view, from_copy;
+  filter->apply(view, from_view);
+  filter->apply(truth.data(), truth.size(), from_copy);
+  expect_same(from_view, from_copy);
+  EXPECT_EQ(from_view.size(), 5u);
+}
+
+TEST(CloudConvView, OrganizedCloudWithoutRowPaddingIsOneView) {
+  const PointCloud2 msg = make_xyzrgb(4, 3);
+  gpu_pointcloud::CloudView view;
+  ASSERT_TRUE(gpu_pointcloud::pointcloud2_view(msg, view));
+  EXPECT_EQ(view.count, 12u);
+}
+
+TEST(CloudConvView, RowPaddingCannotBeViewed) {
+  PointCloud2 msg = make_xyzrgb(3, 2);
+  msg.row_step += 8;
+  msg.data.resize(msg.row_step * msg.height, 0);
+  gpu_pointcloud::CloudView view;
+  EXPECT_FALSE(gpu_pointcloud::pointcloud2_view(msg, view));
+  std::vector<PointXYZ> copied;
+  gpu_pointcloud::from_pointcloud2(msg, copied);  // the copying path still handles it
+  EXPECT_EQ(copied.size(), 6u);
+}
+
+TEST(CloudConvView, EmptyCloudIsAnEmptyView) {
+  const PointCloud2 msg = make_xyzrgb(0, 1);
+  gpu_pointcloud::CloudView view;
+  ASSERT_TRUE(gpu_pointcloud::pointcloud2_view(msg, view));
+  EXPECT_EQ(view.count, 0u);
+}
+
+TEST(CloudConvView, RejectsTheSameCloudsAsTheCopyingPath) {
+  gpu_pointcloud::CloudView view;
+  PointCloud2 no_z = make_xyzrgb(5, 1);
+  no_z.fields.erase(no_z.fields.begin() + 2);
+  EXPECT_THROW(gpu_pointcloud::pointcloud2_view(no_z, view), std::invalid_argument);
+  PointCloud2 short_data = make_xyzrgb(5, 1);
+  short_data.data.resize(short_data.data.size() - 1);
+  EXPECT_THROW(gpu_pointcloud::pointcloud2_view(short_data, view), std::invalid_argument);
+  PointCloud2 big_endian = make_xyzrgb(5, 1);
+  big_endian.is_bigendian = true;
+  EXPECT_THROW(gpu_pointcloud::pointcloud2_view(big_endian, view), std::invalid_argument);
+}
