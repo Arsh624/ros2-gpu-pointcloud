@@ -269,3 +269,14 @@ Found while running item D (`scripts/node_bench.sh`):
 - **Why.** The UDP path is capped by the Docker VM's socket buffer limit, `net.core.rmem_max = 212992` (208 KB), far below one cloud; this is a VM-wide kernel setting and was left alone. Fast DDS's shared-memory transport was in use (its segments appeared in `/dev/shm`), but its default segment is 512 KB, smaller than one sample.
 - **Fix for node runs.** `docker/fastdds_shm_large.xml`: shared memory only, 16 MB segment. With it, 40 of 40 at 320x240, 640x480 and 1280x720, at 10 and 30 Hz. A 32 MB segment failed to allocate: two processes need two segments and Docker's default `/dev/shm` is 64 MB.
 - This profile is used only where transport is not the thing measured. Across containers there is no shared memory, so the networking comparison (item E) has to start from middleware defaults and report drops as measured.
+
+## Network benchmark (Fast DDS against Zenoh)
+
+`scripts/net_bench.sh` with `docker/compose.net.yml`: `cloud_publisher_node` in a `talker` container, `latency_listener_node` in a `listener` container, a `router` container running `rmw_zenohd`, all on one Docker bridge network. Separate containers have separate network and IPC namespaces, so neither middleware can use shared memory between talker and listener. Both containers read the host's clock, so `now - header.stamp` at the listener is a one-way latency without clock-sync error. Versions: Fast DDS 2.14.7 (`rmw_fastrtps_cpp` 8.4.5), `rmw_zenoh_cpp` 0.2.13.
+
+Choices:
+
+- **Payloads.** "raw" is the 640x480 synthetic cloud, packed xyz, 3,686,400 bytes. "filtered" is the same cloud after the default range and voxel filter, 34,654 points, 415,848 bytes. The publisher filters once at start-up (`filter:=true`) rather than a filter node running inside the talker container: that would add an in-container middleware hop for the raw cloud, which drops large clouds with defaults (see "Middleware for same-host node runs").
+- **Samples.** 2020 messages per configuration; the first 20 count as received but are left out of the latency statistics (start-up). Drops are `sent - received`, `sent` from the publisher's summary line, so no sequence numbers are needed. Latency percentiles cover delivered messages only, so a configuration that drops messages is not penalised in its latency columns.
+- **Defaults first.** Fast DDS runs with no configuration; Zenoh needs only the router endpoint and a non-loopback listen endpoint (M0). With defaults Fast DDS dropped 13 to 37% of the messages, so one tuned configuration was added and labelled: `FASTDDS_BUILTIN_TRANSPORTS=LARGE_DATA` (data over TCP instead of UDP, a built-in Fast DDS mode). The UDP losses are consistent with the Docker VM's 208 KB socket buffer cap (`net.core.rmem_max = 212992`), which this repository does not change.
+- The talker builds the package into a named volume (`install`) that the listener mounts, with `-DWITH_CUDA=OFF`: neither node needs the GPU.
