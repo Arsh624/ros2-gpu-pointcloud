@@ -16,8 +16,8 @@
 | M3 CUDA filter | done | [#4](https://github.com/Arsh624/ros2-gpu-pointcloud/pull/4) | Parity exact on RTX 4070; compute-sanitizer could not run under WSL2 (see cuts) |
 | M4 benchmark + profile | done | [#7](https://github.com/Arsh624/ros2-gpu-pointcloud/pull/7) | 3.96x / 7.55x / 10.53x end-to-end at 320x240 / 640x480 / 1280x720; nsys has no GPU kernel data under WSL2 |
 | M5 networking | not started | | Issue https://github.com/Arsh624/ros2-gpu-pointcloud/issues/10  |
-| M6 README + polish | not started | | Issue https://github.com/Arsh624/ros2-gpu-pointcloud/issues/11 |
-| M7 release | not started | | Issue https://github.com/Arsh624/ros2-gpu-pointcloud/issues/12 |
+| M6 README + polish | done | [#17](https://github.com/Arsh624/ros2-gpu-pointcloud/pull/17) | README rewrite, before/after plot, description and topics |
+| M7 release | done | [#17](https://github.com/Arsh624/ros2-gpu-pointcloud/pull/17) | v0.1.0: https://github.com/Arsh624/ros2-gpu-pointcloud/releases/tag/v0.1.0 |
 
 ## Global constraints
 
@@ -169,7 +169,7 @@ Priority changed after M4: strengthen the evidence before adding features. Items
 | C. Explain the CUDA p99 tail at 1280x720 | done | [#15](https://github.com/Arsh624/ros2-gpu-pointcloud/pull/15) | Environmental: GPU idles to P8 (210 MHz) during the CPU runs and needs ~250-320 ms to clock up; the tail was the first timed iterations. Benchmark warmup now also lasts 500 ms. With idle gaps CUDA 1280x720 is 3.0 ms at 30 Hz and 7.0 ms at 10 Hz (cpu_omp: 3.2 and 4.7 ms) |
 | D. Node-level latency and CPU cost per frame | done | [#16](https://github.com/Arsh624/ros2-gpu-pointcloud/pull/16) | 1280x720 at 30 Hz: CUDA 3.48 ms on 0.96 cores, cpu_omp 12 threads 6.68 ms on 4.55 cores; at 10 Hz CUDA 11.07 ms (idle clock-down). Image lacked Fast DDS (nodes ran on Cyclone); with middleware defaults large clouds dropped in-container, fixed for node runs with `docker/fastdds_shm_large.xml` |
 | E. M5 Fast DDS vs Zenoh (#10) | pending | | |
-| F. M6 README rewrite (#11), M7 release (#12) | pending | | |
+| F. M6 README rewrite (#11), M7 release (#12) | done | [#17](https://github.com/Arsh624/ros2-gpu-pointcloud/pull/17) | README rewritten (results led by node latency and cores), quick start run once in a fresh container, `results/before_after.png`, CHANGELOG v0.1.0, release v0.1.0 |
 
 Notes for whoever continues:
 
@@ -182,7 +182,7 @@ Notes for whoever continues:
 
 ## Where this stopped, and exact next steps
 
-Item D is done. Next: F (README rewrite, release v0.1.0), then E. Everything below is what a new session needs; nothing else is in anyone's head.
+Items D and F are done and v0.1.0 is released. Next: E (networking), then a README network section and v0.2.0. Everything below is what a new session needs; nothing else is in anyone's head.
 
 ### Before anything else
 
@@ -237,20 +237,11 @@ Acceptance criteria for E:
 - Default middleware settings first. At most one tuned configuration, clearly labelled, and only if the defaults drop messages.
 - PR with the script's real output in the body; issue #10 closed by it.
 
-### Item F: README rewrite (issue #11), then release (issue #12)
+### Item F: done (PR #17)
 
-The README already has the benchmark, idle-gap, bottleneck, p99 and node-latency sections with numbers from `results/`. What is missing:
+README rewritten; every quick-start command was run once in a fresh dev container (build, test, node with each backend, `bench.sh`, `node_bench.sh`, plot). `bench_filter --dump` and `scripts/plot_before_after.py` make `results/before_after.png`. The dev container now has a 1 GB `/dev/shm` and sets `FASTRTPS_DEFAULT_PROFILES_FILE` (each Fast DDS process takes a 16 MB segment; with 64 MB, a fourth participant such as `ros2 topic echo` failed to start). Repo description and topics set; v0.1.0 released.
 
-1. Two-line "what it is", then a mermaid diagram: sensor -> PointCloud2 -> `pointcloud_filter_node` (cpu | cpu_omp | cuda) -> output, and the CUDA stage pipeline from `docs/DESIGN.md`.
-2. Quick start with the exact commands for: build image, build and test, run the node with each backend, run `bench.sh`, run `node_bench.sh`, run `net_bench.sh`. Run every command once in the dev container before writing it down.
-3. A "Results" section led by, in this order: speedup against the best CPU baseline; node-level latency and CPU cost; the bottleneck story (profiled, changed, before and after); parity tolerance; limitations.
-4. Limitations, complete list: synthetic data only; laptop GPU under WSL2; GPU slows after idle (so results at 10 Hz differ from tight-loop results); two transfer rates per filter instance, cause unknown; compute-sanitizer not run (issue #3); nsys capture has no GPU kernel data; raw-versus-repack rule for wide points is provisional; rising-rate (max sustainable rate) sweep not run; networking on a single host.
-5. `results/before_after.png`: matplotlib scatter of the 320x240 cloud before and after filtering. Needs a way to dump a cloud, for example `bench_filter --dump FILE`. PNG only.
-6. `gh repo edit --description "<one line>" --add-topic ros2,cuda,cpp,robotics,point-cloud,zenoh`.
-
-Then M7: add a v0.1.0 section to `CHANGELOG.md` with numbers copied from `results/`, and `gh release create v0.1.0` (attach `results/profile.nsys-rep` if regenerated with `scripts/profile.sh`). The owner reads the README first.
-
-Rule for every number in the README: it must appear in a committed file under `results/`.
+After E: add a "Networking" section to the README (before Limitations) from `results/net.csv`, replace the networking limitation bullet, add a v0.2.0 CHANGELOG section and `gh release create v0.2.0`.
 
 ### Open questions worth an hour each, in order of value
 
