@@ -165,7 +165,7 @@ Priority changed after M4: strengthen the evidence before adding features. Items
 | Item | State | PR | Key result |
 |---|---|---|---|
 | A. PCL and OpenMP CPU baselines (#8, #9) | done | [#13](https://github.com/Arsh624/ros2-gpu-pointcloud/pull/13) | Best CPU is OpenMP on 20 threads. CUDA end-to-end vs best CPU: 0.55x / 0.86x / 1.12x at 320x240 / 640x480 / 1280x720. GPU-only: 1.04x / 2.39x / 4.64x |
-| B. Fix the input copy bottleneck (#5) | in progress | | |
+| B. Fix the input copy bottleneck (#5) | in review | | CUDA end-to-end 0.442 / 0.998 / 2.356 ms -> 0.430 / 0.792 / 1.702 ms (main run); vs best CPU 0.57x / 1.11x / 1.63x. Over 7 launches 1280x720 is ~1.5 ms (5) or ~2.4 ms (2) |
 | C. Explain the CUDA p99 tail at 1280x720 | pending | | |
 | D. Node-level latency and max sustainable rate | pending | | |
 | E. M5 Fast DDS vs Zenoh (#10) | pending | | |
@@ -175,4 +175,6 @@ Notes for whoever continues:
 
 - Build with `colcon build --cmake-args -DWITH_PCL=ON` in the dev container; `scripts/bench.sh` expects the PCL baseline.
 - Earlier benchmark runs live in `results/history/<name>/`. Move the current `results/*.csv`, `bench.md` and `env.txt` there before a run that changes the code under test, and add a row to the README history table.
-- Item B starts from `results/stages.csv`: `h2d_copy` is 1.62 ms of the 2.36 ms end-to-end at 1280x720.
+- Python on the Windows host is `python3`; write files in binary mode from it (text mode writes CRLF, which breaks the shell scripts inside the container).
+- The CUDA input stage has two speeds that are fixed per filter instance (about 0.93 or 1.74 ms at 1280x720). Host memory, CPU core, huge pages and the bare transfer call were ruled out; see `docs/DESIGN.md`, "Two transfer rates". Always compare CUDA variants inside one process (`bench_cuda_input`) or over several launches (`results/cuda_launches.csv`), never from two single launches.
+- Item C (the p99 tail): in the M4 and baseline runs the 1280x720 CUDA p99 was 11 to 12 ms. In the two runs after item B it was 1.9 and 2.0 ms. Start by checking whether the tail still appears at all.

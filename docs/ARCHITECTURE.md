@@ -6,7 +6,7 @@ One ament_cmake package, `gpu_pointcloud`, in two layers.
 
 | File | Role |
 |---|---|
-| `include/gpu_pointcloud/filter.hpp` | Point type, parameters, the `Filter` interface and backend factories |
+| `include/gpu_pointcloud/filter.hpp` | Point type, `CloudView` (strided input), parameters, the `Filter` interface and backend factories |
 | `src/filter_cpu.cpp` | Single-threaded reference backend |
 | `src/filter_cpu_omp.cpp` | OpenMP backend, bit-identical to the reference |
 | `src/filter_cuda.cu` | CUDA backend, built only with `WITH_CUDA=ON` |
@@ -44,3 +44,16 @@ Tests and the benchmark link only this library, so they run without a ROS graph.
 | `test/test_cloud_conv.cpp` | PointCloud2 conversion, including clouds it must reject |
 | `test/test_parity_cuda.cpp` | The cases on the CUDA backend and CPU-vs-CUDA parity; skipped without a GPU |
 | `test/test_pcl_baseline.cpp` | Checks the PCL baseline does comparable work (`WITH_PCL=ON` only) |
+
+## Benchmarks and scripts
+
+| File | Role |
+|---|---|
+| `bench/bench_filter.cpp` | Benchmark of every backend, no ROS; writes `results/bench.csv` and `results/stages.csv` |
+| `bench/pcl_baseline.{hpp,cpp}` | PCL range + VoxelGrid reference pipeline for the benchmark (`WITH_PCL=ON` only) |
+| `bench/bench_cuda_input.cpp` | Raw upload vs host repack, interleaved in one process; rows for `results/cuda_input_modes.csv` |
+| `bench/bench_h2d.cu` | Bare host-to-device transfer time by source-buffer allocation method |
+| `scripts/bench.sh` | Runs the benchmarks under the 20 + 200 protocol and records the environment in `results/env.txt` |
+| `scripts/profile.sh` | Nsight Systems capture and `results/nsys_summary.txt` |
+
+`results/` holds the current run; `results/history/<name>/` holds earlier runs for before/after comparison.
