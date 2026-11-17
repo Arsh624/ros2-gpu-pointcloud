@@ -32,6 +32,7 @@ endif()
 
 set(CORE_SOURCES
   src/filter_cpu.cpp
+  src/filter_cpu_omp.cpp
   src/synthetic.cpp
   # --- core sources are appended here in later milestones ---
 )
@@ -39,8 +40,10 @@ if(WITH_CUDA)
   list(APPEND CORE_SOURCES src/filter_cuda.cu)
 endif()
 
+find_package(OpenMP REQUIRED COMPONENTS CXX)
 add_library(gpu_pointcloud_core STATIC ${CORE_SOURCES})
 set_target_properties(gpu_pointcloud_core PROPERTIES POSITION_INDEPENDENT_CODE ON)
+target_link_libraries(gpu_pointcloud_core PUBLIC OpenMP::OpenMP_CXX)
 target_include_directories(gpu_pointcloud_core PUBLIC
   $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
   $<INSTALL_INTERFACE:include>)
@@ -56,7 +59,20 @@ add_executable(bench_filter bench/bench_filter.cpp)
 target_compile_options(bench_filter PRIVATE -Wall -Wextra -Wpedantic -O3)
 target_link_libraries(bench_filter gpu_pointcloud_core)
 
-message(STATUS "gpu_pointcloud: WITH_CUDA=${WITH_CUDA} CORE_ONLY=${CORE_ONLY}")
+# Optional PCL reference pipeline for the benchmark. OFF by default so the package has no PCL
+# dependency; the dev image has PCL installed for it.
+option(WITH_PCL "Add a pcl::VoxelGrid baseline to bench_filter" OFF)
+if(WITH_PCL)
+  find_package(PCL REQUIRED COMPONENTS common filters)
+  add_library(gpu_pointcloud_pcl_baseline STATIC bench/pcl_baseline.cpp)
+  target_compile_options(gpu_pointcloud_pcl_baseline PRIVATE -O3)
+  target_include_directories(gpu_pointcloud_pcl_baseline SYSTEM PRIVATE ${PCL_INCLUDE_DIRS})
+  target_link_libraries(gpu_pointcloud_pcl_baseline PUBLIC gpu_pointcloud_core ${PCL_LIBRARIES})
+  target_compile_definitions(bench_filter PRIVATE GPU_POINTCLOUD_WITH_PCL)
+  target_link_libraries(bench_filter gpu_pointcloud_pcl_baseline)
+endif()
+
+message(STATUS "gpu_pointcloud: WITH_CUDA=${WITH_CUDA} WITH_PCL=${WITH_PCL} CORE_ONLY=${CORE_ONLY}")
 
 if(NOT CORE_ONLY)
   find_package(ament_cmake REQUIRED)
@@ -90,6 +106,10 @@ if(NOT CORE_ONLY)
     find_package(ament_cmake_gtest REQUIRED)
     ament_add_gtest(test_filter_cpu test/test_filter_cpu.cpp)
     target_link_libraries(test_filter_cpu gpu_pointcloud_core)
+    if(WITH_PCL)
+      ament_add_gtest(test_pcl_baseline test/test_pcl_baseline.cpp)
+      target_link_libraries(test_pcl_baseline gpu_pointcloud_pcl_baseline)
+    endif()
     if(WITH_CUDA)
       # Skips itself at run time when no CUDA device is visible.
       ament_add_gtest(test_parity_cuda test/test_parity_cuda.cpp)

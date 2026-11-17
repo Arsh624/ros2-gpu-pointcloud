@@ -58,6 +58,11 @@ class Filter {
 
 // Both factories validate `params` and throw std::invalid_argument when they are bad.
 std::unique_ptr<Filter> make_cpu_filter(const FilterParams& params);
+// Multi-threaded CPU backend (OpenMP). Same output as make_cpu_filter, bit for bit.
+// `threads` = 0 uses default_cpu_threads(); a negative count throws std::invalid_argument.
+std::unique_ptr<Filter> make_cpu_omp_filter(const FilterParams& params, int threads = 0);
+// Number of threads OpenMP uses by default on this machine.
+int default_cpu_threads();
 // `reserve_points` sizes the preallocated device buffers; larger clouds grow them once.
 // Throws std::runtime_error when built without CUDA or when no device is usable.
 std::unique_ptr<Filter> make_cuda_filter(const FilterParams& params, std::size_t reserve_points);
