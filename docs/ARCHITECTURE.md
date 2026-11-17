@@ -52,6 +52,7 @@ Tests and the benchmark link only this library, so they run without a ROS graph.
 | `bench/bench_filter.cpp` | Benchmark of every backend, no ROS; writes `results/bench.csv` and `results/stages.csv` |
 | `bench/pcl_baseline.{hpp,cpp}` | PCL range + VoxelGrid reference pipeline for the benchmark (`WITH_PCL=ON` only) |
 | `bench/bench_cuda_input.cpp` | Raw upload vs host repack, interleaved in one process; rows for `results/cuda_input_modes.csv` |
+| `bench/bench_idle_gap.cpp` | Call time after controlled idle gaps and recovery after 3 s idle; writes `results/idle_gap.csv` and `results/idle_recovery.csv` |
 | `bench/bench_h2d.cu` | Bare host-to-device transfer time by source-buffer allocation method |
 | `scripts/bench.sh` | Runs the benchmarks under the 20 + 200 protocol and records the environment in `results/env.txt` |
 | `scripts/profile.sh` | Nsight Systems capture and `results/nsys_summary.txt` |
