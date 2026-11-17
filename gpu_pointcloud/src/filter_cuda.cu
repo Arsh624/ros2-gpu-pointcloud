@@ -146,8 +146,7 @@ class CudaFilter final : public Filter {
   CudaFilter(const FilterParams& params, std::size_t reserve_points)
       : params_(params), layout_(make_key_layout(params)) {
     GPC_CUDA_CHECK(cudaStreamCreate(&stream_));
-    GPC_CUDA_CHECK(cudaEventCreate(&ev_start_));
-    GPC_CUDA_CHECK(cudaEventCreate(&ev_stop_));
+    for (cudaEvent_t& ev : ev_) GPC_CUDA_CHECK(cudaEventCreate(&ev));
     GPC_CUDA_CHECK(cudaMalloc(&d_meta_, sizeof(Meta)));
     GPC_CUDA_CHECK(cudaMallocHost(&h_meta_, sizeof(Meta)));
     reserve(std::max<std::size_t>(reserve_points, 1));
@@ -158,8 +157,7 @@ class CudaFilter final : public Filter {
     cudaFree(d_meta_);
     cudaFreeHost(h_meta_);
     cudaFree(d_temp_);
-    if (ev_start_) cudaEventDestroy(ev_start_);
-    if (ev_stop_) cudaEventDestroy(ev_stop_);
+    for (cudaEvent_t ev : ev_) if (ev) cudaEventDestroy(ev);
     if (stream_) cudaStreamDestroy(stream_);
   }
 
@@ -174,13 +172,14 @@ class CudaFilter final : public Filter {
     if (n_points == 0) return stats;
     if (n_points > capacity_) reserve(n_points);
     const int n = static_cast<int>(n_points);
+    mark(kBegin);
 
     {
       NvtxRange r("h2d");
       std::memcpy(h_in_, in, n_points * sizeof(PointXYZ));
       GPC_CUDA_CHECK(cudaMemcpyAsync(d_points_, h_in_, n_points * sizeof(PointXYZ), cudaMemcpyHostToDevice, stream_));
     }
-    GPC_CUDA_CHECK(cudaEventRecord(ev_start_, stream_));
+    mark(kAfterH2D);
 
     int num_kept = 0;
     {
@@ -191,6 +190,7 @@ class CudaFilter final : public Filter {
                                                              d_meta_->rejected);
       GPC_CUDA_CHECK(cudaGetLastError());
 
+      mark(kAfterClassify);
       cub::CountingInputIterator<std::uint32_t> all_indices(0);
       std::size_t bytes = 0;
       GPC_CUDA_CHECK(cub::DeviceSelect::Flagged(nullptr, bytes, all_indices, d_keep_, d_index_a_,
@@ -198,6 +198,7 @@ class CudaFilter final : public Filter {
       ensure_temp(bytes);
       GPC_CUDA_CHECK(cub::DeviceSelect::Flagged(d_temp_, bytes, all_indices, d_keep_, d_index_a_,
                                                 &d_meta_->num_kept, n, stream_));
+      mark(kAfterSelect);
       // The host needs the kept count to size the sort, so this is a required sync point.
       fetch_meta();
       num_kept = h_meta_->num_kept;
@@ -213,6 +214,7 @@ class CudaFilter final : public Filter {
         gather_keys_kernel<<<blocks_for(num_kept), kBlock, 0, stream_>>>(d_keys_a_, d_index_a_, num_kept, d_keys_b_);
         GPC_CUDA_CHECK(cudaGetLastError());
       }
+      mark(kAfterGather);
       // d_keys_a_ is free again after the gather, so it serves as the sort's alternate buffer.
       cub::DoubleBuffer<std::uint64_t> keys(d_keys_b_, d_keys_a_);
       cub::DoubleBuffer<std::uint32_t> index(d_index_a_, d_index_b_);
@@ -223,6 +225,7 @@ class CudaFilter final : public Filter {
         ensure_temp(bytes);
         GPC_CUDA_CHECK(cub::DeviceRadixSort::SortPairs(d_temp_, bytes, keys, index, num_kept, 0, 3 * layout_.bits, stream_));
       }
+      mark(kAfterSort);
       {
         NvtxRange r("reduce_by_key");
         cub::TransformInputIterator<Sum, LoadPoint, const std::uint32_t*> values(index.Current(), LoadPoint{d_points_});
@@ -233,6 +236,7 @@ class CudaFilter final : public Filter {
         ensure_temp(bytes);
         GPC_CUDA_CHECK(cub::DeviceReduce::ReduceByKey(d_temp_, bytes, keys.Current(), unique_keys, values, d_sums_,
                                                       &d_meta_->num_voxels, AddSum{}, num_kept, stream_));
+        mark(kAfterReduce);
         // Second required sync point: the host needs the voxel count to size the output copy.
         fetch_meta();
         num_voxels = h_meta_->num_voxels;
@@ -242,27 +246,56 @@ class CudaFilter final : public Filter {
         centroid_kernel<<<blocks_for(num_voxels), kBlock, 0, stream_>>>(d_sums_, num_voxels, d_out_);
         GPC_CUDA_CHECK(cudaGetLastError());
       }
+    } else {
+      // Nothing survived the filter: keep the skipped stage boundaries valid (zero-length stages).
+      mark(kAfterGather);
+      mark(kAfterSort);
+      mark(kAfterReduce);
     }
-    GPC_CUDA_CHECK(cudaEventRecord(ev_stop_, stream_));
+    mark(kAfterCentroid);
 
     {
       NvtxRange r("d2h");
       if (num_voxels > 0) {
         GPC_CUDA_CHECK(cudaMemcpyAsync(h_out_, d_out_, num_voxels * sizeof(PointXYZ), cudaMemcpyDeviceToHost, stream_));
       }
+      mark(kAfterD2H);
       GPC_CUDA_CHECK(cudaStreamSynchronize(stream_));
       out.resize(num_voxels);
       if (num_voxels > 0) std::memcpy(out.data(), h_out_, num_voxels * sizeof(PointXYZ));
     }
 
-    float ms = 0.0f;
-    GPC_CUDA_CHECK(cudaEventElapsedTime(&ms, ev_start_, ev_stop_));
-    stats.device_ms = ms;
+    for (int i = 0; i + 1 < kNumMarks; ++i) stage_ms_[i] = elapsed_ms(i, i + 1);
+    stats.device_ms = elapsed_ms(kAfterH2D, kAfterCentroid);
     stats.out = out.size();
     return stats;
   }
 
+  std::vector<StageTime> last_stage_times() const override {
+    // Each stage is the interval between two events on the stream, so it is GPU-clock time.
+    // The two stages that follow a host sync also contain the host round trip.
+    static const char* const names[kNumMarks - 1] = {
+        "h2d_copy", "classify", "select", "host_sync+gather_keys", "radix_sort",
+        "reduce_by_key", "host_sync+centroid", "d2h_copy"};
+    std::vector<StageTime> stages;
+    for (int i = 0; i + 1 < kNumMarks; ++i) stages.push_back({names[i], stage_ms_[i]});
+    return stages;
+  }
+
  private:
+  enum Mark {
+    kBegin, kAfterH2D, kAfterClassify, kAfterSelect, kAfterGather, kAfterSort, kAfterReduce,
+    kAfterCentroid, kAfterD2H, kNumMarks
+  };
+
+  void mark(Mark m) { GPC_CUDA_CHECK(cudaEventRecord(ev_[m], stream_)); }
+
+  double elapsed_ms(int from, int to) const {
+    float ms = 0.0f;
+    GPC_CUDA_CHECK(cudaEventElapsedTime(&ms, ev_[from], ev_[to]));
+    return ms;
+  }
+
   void fetch_meta() {
     GPC_CUDA_CHECK(cudaMemcpyAsync(h_meta_, d_meta_, sizeof(Meta), cudaMemcpyDeviceToHost, stream_));
     GPC_CUDA_CHECK(cudaStreamSynchronize(stream_));
@@ -335,7 +368,8 @@ class CudaFilter final : public Filter {
   FilterParams params_;
   KeyLayout layout_;
   cudaStream_t stream_ = nullptr;
-  cudaEvent_t ev_start_ = nullptr, ev_stop_ = nullptr;
+  cudaEvent_t ev_[kNumMarks] = {};
+  double stage_ms_[kNumMarks - 1] = {};
 
   std::size_t capacity_ = 0;  // points the buffers below can hold
   PointXYZ* d_points_ = nullptr;

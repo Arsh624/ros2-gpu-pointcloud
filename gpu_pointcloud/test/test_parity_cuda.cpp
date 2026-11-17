@@ -133,3 +133,23 @@ TEST(ParityExtra, ReportsDeviceTime) {
   const FilterStats s = make_cuda_filter({}, cloud.size())->apply(cloud.data(), cloud.size(), out);
   EXPECT_GT(s.device_ms, 0.0);
 }
+
+TEST(ParityExtra, StageTimesCoverTheDevicePipeline) {
+  SKIP_WITHOUT_GPU();
+  const auto cloud = make_synthetic_cloud(640, 480);
+  std::vector<PointXYZ> out;
+  auto cuda = make_cuda_filter({}, cloud.size());
+  const FilterStats s = cuda->apply(cloud.data(), cloud.size(), out);
+  const auto stages = cuda->last_stage_times();
+  ASSERT_EQ(stages.size(), 8u);
+  EXPECT_STREQ(stages.front().name, "h2d_copy");
+  EXPECT_STREQ(stages.back().name, "d2h_copy");
+  double device = 0.0;
+  for (std::size_t i = 0; i < stages.size(); ++i) {
+    EXPECT_GE(stages[i].ms, 0.0) << stages[i].name;
+    if (i != 0 && i + 1 != stages.size()) device += stages[i].ms;
+  }
+  // device_ms spans exactly the stages between the two copies.
+  EXPECT_NEAR(device, s.device_ms, 0.01 + 0.02 * s.device_ms);
+  EXPECT_TRUE(make_cpu_filter({})->last_stage_times().empty());
+}
