@@ -35,40 +35,56 @@ std::size_t float32_offset(const PointCloud2& msg, const char* name) {
   throw std::invalid_argument(std::string("PointCloud2 has no '") + name + "' field");
 }
 
+struct Layout {
+  std::size_t ox, oy, oz;
+  std::size_t width, height, point_step, row_step;
+};
+
+// Everything both conversions need to know, checked once. Throws when the cloud cannot be read
+// safely.
+Layout checked_layout(const PointCloud2& msg) {
+  if (msg.is_bigendian != host_is_big_endian()) {
+    throw std::invalid_argument("PointCloud2 endianness differs from the host; not supported");
+  }
+  Layout l{float32_offset(msg, "x"), float32_offset(msg, "y"), float32_offset(msg, "z"),
+           msg.width,                msg.height,               msg.point_step,
+           msg.row_step};
+  if (l.width == 0 || l.height == 0) return l;
+  if (l.row_step < l.width * l.point_step) {
+    throw std::invalid_argument("PointCloud2 row_step is smaller than width * point_step");
+  }
+  if (msg.data.size() < (l.height - 1) * l.row_step + l.width * l.point_step) {
+    throw std::invalid_argument("PointCloud2 data is shorter than its width, height and steps imply");
+  }
+  return l;
+}
+
 }  // namespace
 
 void from_pointcloud2(const PointCloud2& msg, std::vector<PointXYZ>& out) {
   out.clear();
-  if (msg.is_bigendian != host_is_big_endian()) {
-    throw std::invalid_argument("PointCloud2 endianness differs from the host; not supported");
-  }
-  const std::size_t ox = float32_offset(msg, "x");
-  const std::size_t oy = float32_offset(msg, "y");
-  const std::size_t oz = float32_offset(msg, "z");
+  const Layout l = checked_layout(msg);
+  if (l.width == 0 || l.height == 0) return;
 
-  const std::size_t width = msg.width, height = msg.height;
-  const std::size_t point_step = msg.point_step, row_step = msg.row_step;
-  if (width == 0 || height == 0) return;
-  if (row_step < width * point_step) {
-    throw std::invalid_argument("PointCloud2 row_step is smaller than width * point_step");
-  }
-  if (msg.data.size() < (height - 1) * row_step + width * point_step) {
-    throw std::invalid_argument("PointCloud2 data is shorter than its width, height and steps imply");
-  }
-
-  out.resize(width * height);
+  out.resize(l.width * l.height);
   PointXYZ* dst = out.data();
-  for (std::size_t r = 0; r < height; ++r) {
-    const std::uint8_t* src = msg.data.data() + r * row_step;
-    for (std::size_t c = 0; c < width; ++c, src += point_step, ++dst) {
-      std::memcpy(&dst->x, src + ox, sizeof(float));
-      std::memcpy(&dst->y, src + oy, sizeof(float));
-      std::memcpy(&dst->z, src + oz, sizeof(float));
+  for (std::size_t r = 0; r < l.height; ++r) {
+    const std::uint8_t* src = msg.data.data() + r * l.row_step;
+    for (std::size_t c = 0; c < l.width; ++c, src += l.point_step, ++dst) {
+      std::memcpy(&dst->x, src + l.ox, sizeof(float));
+      std::memcpy(&dst->y, src + l.oy, sizeof(float));
+      std::memcpy(&dst->z, src + l.oz, sizeof(float));
     }
   }
 }
 
-bool pointcloud2_view(const PointCloud2&, CloudView&) { return false; }  // tests first
+bool pointcloud2_view(const PointCloud2& msg, CloudView& view) {
+  const Layout l = checked_layout(msg);
+  const bool padded_rows = l.height > 1 && l.row_step != l.width * l.point_step;
+  if (padded_rows) return false;
+  view = {msg.data.data(), l.width * l.height, l.point_step, l.ox, l.oy, l.oz};
+  return true;
+}
 
 void to_pointcloud2(const PointXYZ* points, std::size_t n, const std_msgs::msg::Header& header, PointCloud2& out) {
   out.header = header;
