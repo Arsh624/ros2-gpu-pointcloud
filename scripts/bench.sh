@@ -21,6 +21,7 @@ mkdir -p "$repo/results"
   echo "git_dirty: $(git -c safe.directory='*' -C "$repo" status --porcelain -- gpu_pointcloud | wc -l) modified files under gpu_pointcloud/"
 } > "$repo/results/env.txt"
 
-"$bench" --backend all --res all --warmup 20 --iters 200 --csv "$repo/results/bench.csv" \n  --stages-csv "$repo/results/stages.csv" | tee "$repo/results/bench.md"
+"$bench" --backend all --res all --warmup 20 --iters 200 --csv "$repo/results/bench.csv" \
+  --stages-csv "$repo/results/stages.csv" | tee "$repo/results/bench.md"
 echo
 cat "$repo/results/env.txt"

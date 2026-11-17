@@ -47,7 +47,7 @@ struct Row {
 
 [[noreturn]] void usage(const char* error) {
   std::fprintf(stderr, "error: %s\nusage: bench_filter [--backend cpu|cuda|all] [--res WxH|all] [--iters N] "
-                       "[--warmup N] [--csv FILE]\n", error);
+                       "[--warmup N] [--csv FILE] [--stages-csv FILE]\n", error);
   std::exit(2);
 }
 
