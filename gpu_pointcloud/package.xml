@@ -1,0 +1,20 @@
+<?xml version="1.0"?>
+<package format="3">
+  <name>gpu_pointcloud</name>
+  <version>0.1.0</version>
+  <description>Range and voxel-grid point cloud filter with interchangeable CPU and CUDA backends.</description>
+  <maintainer email="Arsh624@users.noreply.github.com">Arsh624</maintainer>
+  <license>MIT</license>
+
+  <buildtool_depend>ament_cmake</buildtool_depend>
+
+  <depend>rclcpp</depend>
+  <depend>sensor_msgs</depend>
+  <depend>std_msgs</depend>
+
+  <test_depend>ament_cmake_gtest</test_depend>
+
+  <export>
+    <build_type>ament_cmake</build_type>
+  </export>
+</package>
