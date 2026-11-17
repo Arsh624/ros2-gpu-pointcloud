@@ -59,6 +59,14 @@ add_executable(bench_filter bench/bench_filter.cpp)
 target_compile_options(bench_filter PRIVATE -Wall -Wextra -Wpedantic -O3)
 target_link_libraries(bench_filter gpu_pointcloud_core)
 
+if(WITH_CUDA)
+  add_executable(bench_cuda_input bench/bench_cuda_input.cpp)
+  target_compile_options(bench_cuda_input PRIVATE -Wall -Wextra -Wpedantic -O3)
+  target_link_libraries(bench_cuda_input gpu_pointcloud_core)
+  add_executable(bench_h2d bench/bench_h2d.cu)
+  target_link_libraries(bench_h2d CUDA::cudart)
+endif()
+
 # Optional PCL reference pipeline for the benchmark. OFF by default so the package has no PCL
 # dependency; the dev image has PCL installed for it.
 option(WITH_PCL "Add a pcl::VoxelGrid baseline to bench_filter" OFF)
@@ -94,6 +102,9 @@ if(NOT CORE_ONLY)
   endforeach()
   target_sources(pointcloud_filter_node PRIVATE src/filter_node.cpp)
   target_sources(cloud_publisher_node PRIVATE src/cloud_publisher_node.cpp)
+  if(WITH_CUDA)
+    install(TARGETS bench_cuda_input RUNTIME DESTINATION lib/${PROJECT_NAME})
+  endif()
   install(TARGETS pointcloud_filter_node cloud_publisher_node bench_filter RUNTIME DESTINATION lib/${PROJECT_NAME})
 
   install(DIRECTORY include/ DESTINATION include)

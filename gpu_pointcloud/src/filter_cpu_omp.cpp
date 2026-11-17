@@ -33,7 +33,10 @@ class CpuOmpFilter final : public Filter {
     if (threads_ == 0) threads_ = default_cpu_threads();
   }
 
-  FilterStats apply(const PointXYZ* in, std::size_t n, std::vector<PointXYZ>& out) override {
+  FilterStats apply(const CloudView& view, std::vector<PointXYZ>& out) override {
+    validate(view);
+    const std::size_t n = view.count;
+    const detail::PointReader in(view);
     if (n > std::numeric_limits<std::uint32_t>::max()) {
       throw std::length_error("cloud has more than 2^32 - 1 points");
     }
@@ -59,7 +62,7 @@ class CpuOmpFilter final : public Filter {
       std::size_t kept = 0;
       for (std::size_t i = lo; i < hi; ++i) {
         std::uint64_t key = 0;
-        const detail::PointClass c = detail::classify(in[i], voxel_size, min_range, max_range, key);
+        const detail::PointClass c = detail::classify(in(i), voxel_size, min_range, max_range, key);
         keys_[i] = key;
         kept_[i] = c == detail::kKept;
         kept += c == detail::kKept;
@@ -112,7 +115,7 @@ class CpuOmpFilter final : public Filter {
         double sx = 0.0, sy = 0.0, sz = 0.0;
         std::size_t count = 0;
         for (; i < begin[t + 1] && keyed_[i].first == key; ++i, ++count) {
-          const PointXYZ& p = in[keyed_[i].second];
+          const PointXYZ p = in(keyed_[i].second);
           sx += p.x;
           sy += p.y;
           sz += p.z;

@@ -58,8 +58,8 @@ Per frame, on one stream:
 
 | Stage | How | Why |
 |---|---|---|
-| H2D | `memcpy` into a pinned buffer, `cudaMemcpyAsync` | Pinned memory makes the copy asynchronous and avoids a staging copy inside the driver |
-| Classify | one kernel: finite test, range test, voxel key, keep flag | One pass over the input; uses the same `detail::classify` as the CPU code |
+| H2D | `cudaMemcpyAsync` straight from the input buffer (see "Input path") | Measured: a pinned staging buffer added a host copy and did not speed up the transfer |
+| Classify | one kernel: read x, y, z by offset, finite test, range test, voxel key, keep flag | One pass over the input; uses the same `detail::classify` as the CPU code |
 | Select | `cub::DeviceSelect::Flagged` over a counting iterator | Yields the indices of kept points, so later stages never touch rejected ones |
 | Gather keys | small kernel | Keys of kept points, contiguous, ready to sort |
 | Sort | `cub::DeviceRadixSort::SortPairs` on (key, index) with `DoubleBuffer` | Brings equal keys together; ascending key order is the output order |
@@ -69,7 +69,7 @@ Per frame, on one stream:
 
 Decisions:
 
-- **Nothing is allocated per frame.** Device buffers, both pinned host buffers and the CUB temporary storage are sized once for `reserve_points` (the node reserves 1280x720). A larger cloud reallocates once and the new size is kept. The three CUB stages share one temporary buffer sized for the largest of them.
+- **Nothing is allocated per frame.** Device buffers, the pinned output buffer and the CUB temporary storage are sized once for `reserve_points` (the node reserves 1280x720). A larger cloud reallocates once and the new size is kept. The three CUB stages share one temporary buffer sized for the largest of them.
 - **Narrowed sort key.** A kept point has `|coord| <= max_range`, so its voxel index lies in `[-L, L]` with `L = ceil(max_range / voxel_size) + 1`. The kernel rebases each 21-bit field by `2^20 - L` and repacks with just enough bits per axis. The order is the same as for the canonical key, but the radix sort only processes `3 * bits` bits: 27 with the defaults instead of 63. When `L` does not fit in fewer than 21 bits the canonical key is used unchanged.
 - **Reject counters.** Each block counts its rejected points per class in shared memory and adds the totals to three global counters, so there is one global atomic per block and class instead of one per rejected point.
 - **Two host syncs inside the pipeline.** CUB takes item counts as host values, so the host must read the kept count before the sort and the voxel count before the output copy. Both are a few bytes read through a pinned buffer.
@@ -95,9 +95,9 @@ The two errors in its summary are these start-up errors, not memory errors: the 
 | Timing | Clock | Covers |
 |---|---|---|
 | cpu / end_to_end | `std::chrono::steady_clock` around `apply` | The whole CPU filter |
-| cuda / end_to_end | `std::chrono::steady_clock` around `apply` | Host input to host output: copy into pinned memory, H2D, device pipeline, D2H, final stream synchronisation, copy into the output vector |
+| cuda / end_to_end | `std::chrono::steady_clock` around `apply` | Host input to host output: H2D from the input buffer (after a host gather for wide points), device pipeline, D2H, final stream synchronisation, copy into the output vector |
 | cuda / gpu_only | cudaEvents (`FilterStats::device_ms`) | Device pipeline between the two transfers, including the two small host syncs |
-| per stage | cudaEvents at each stage boundary | One interval per stage; `h2d_copy` also contains the host `memcpy` into the pinned buffer, and the two `host_sync+...` stages contain the host round trip |
+| per stage | cudaEvents at each stage boundary | One interval per stage; `h2d_copy` also contains the host gather when wide points are repacked, and the two `host_sync+...` stages contain the host round trip |
 
 Reported statistics are the median and the nearest-rank 99th percentile. Speedup is CPU median divided by CUDA median. Input points per second is the input size divided by the median time.
 
@@ -154,3 +154,62 @@ Measured on the synthetic clouds at 3 resolutions x voxel sizes {0.02, 0.05, 0.1
 - Centroids agree to within 5e-6 m in seven cases. In the two largest clouds at voxel 0.02 the worst difference is 1e-2 m and 4e-3 m. That is the size expected when a boundary point is assigned to the neighbouring voxel, which fits the reciprocal-multiply difference, but the cause was not traced point by point.
 
 Because of these differences the test does not demand parity with PCL. It requires the counts to agree within 1% and at least 99% of our voxels to be occupied in PCL's result, which is enough to say the two do comparable work.
+
+## Input path
+
+This section replaces the H2D row of the pipeline table above: there is no pinned input buffer any more.
+
+### Strided views
+
+Every backend takes a `CloudView`: a pointer, a count, a stride and the byte offsets of float32 x, y, z. That is the layout of a `sensor_msgs/PointCloud2` without row padding, so a message can be filtered where it lies. Points are read with `detail::PointReader`, which uses `memcpy` and therefore works for any alignment on the host. Packed `PointXYZ` arrays are the special case stride 12, offsets 0/4/8.
+
+### What was measured
+
+The first stage breakdown (`results/history/a-baselines/stages.csv`) had `h2d_copy` at 1.62 ms of a 2.36 ms end-to-end at 1280x720. That stage was a `memcpy` into a pinned buffer plus one `cudaMemcpyAsync`.
+
+Exploratory runs on the old code (100 iterations each, not committed as results) separated the parts:
+
+| Variant at 1280x720 | Input stage ms |
+|---|---:|
+| `memcpy` to pinned + async transfer (the old path) | 1.61 to 1.69 |
+| host `memcpy` only, no transfer | 0.45 |
+| async transfer straight from the caller's pageable buffer | 0.93 to 0.97, or 1.77 to 1.79 (see below) |
+| pinned staging in 64k-point chunks | 0.96, or 1.81 |
+
+`gpu_pointcloud/bench/bench_h2d.cu` then measured the bare transfer of 11 MB with no filter around it: about 1.0 ms (11.5 GB/s) from `malloc` memory, from memory with huge pages disabled, from huge-page-aligned memory and from pinned memory alike, on every buffer tried.
+
+Conclusions:
+
+- The transfer costs about 1 ms for 11 MB whatever the source memory is. Pinning does not make it faster on this platform.
+- The old path therefore paid 0.45 ms for a staging copy that bought nothing. Transferring directly from the caller's buffer removes it.
+- Chunking and two-stream overlap were not pursued: the kernels that could overlap with the transfer (classify, 0.2 ms) are small next to it, and chunked pinned transfers measured the same as the direct transfer.
+
+### Raw upload or host repack for wide points
+
+With a point stride above 12 bytes there is a choice: upload all the bytes and read fields on the device (`CudaInput::kRaw`), or gather x, y, z on the host and upload 12 bytes per point (`CudaInput::kRepack`). `bench_cuda_input` runs both in one process, alternating per iteration (`results/cuda_input_modes.csv`, medians over three launches):
+
+| Point step | Resolution | Raw ms | Repack ms |
+|---|---|---:|---:|
+| 16 | 320x240 | 0.41 | 0.43 |
+| 16 | 640x480 | 0.82 | 0.93 |
+| 16 | 1280x720 | 3.03 | 3.42 |
+| 32 | 320x240 | 0.53 | 0.47 |
+| 32 | 640x480 | 1.26 | 1.08 |
+| 32 | 1280x720 | 3.34 | 3.49 |
+
+`CudaInput::kAuto` therefore uploads raw up to 16 bytes per point and repacks wider points. Layouts whose stride or offsets are not multiples of 4 are always repacked, because the device cannot read misaligned floats. This rule is provisional: the two modes run in separate filter instances, and the state effect described next disturbs the comparison. An earlier six-launch run of the same tool gave 1.84 ms for 16-byte raw upload at 1280x720 where this table has 3.03 ms.
+
+### Two transfer rates (open, environmental)
+
+The input stage of the same binary takes one of two values. At 1280x720 it is about 0.93 ms or about 1.74 ms. `results/cuda_launches.csv` has seven launches of the benchmark: five at about 1.5 ms end-to-end, two at about 2.4 ms. Within a launch, different filter instances can be in different states.
+
+What was ruled out, each by a direct measurement:
+
+- **Host memory bandwidth and CPU core type.** In 14 launches of a test that timed the filter, a plain 11 MB `memcpy` and the CPU filter side by side, three launches had the slow input stage. `memcpy` (0.41 to 0.46 ms) and the CPU filter (24.5 to 26.0 ms) were the same in slow and fast launches.
+- **CPU affinity.** Pinning the process to a given logical CPU with `taskset` produced both states on the same CPU number.
+- **Huge pages and buffer alignment.** `bench_h2d` shows the same rate for every allocation method, and the amount of transparent-huge-page backing did not track the state.
+- **The transfer call itself.** Outside the filter, synchronous and stream-asynchronous transfers to 16 different device buffers all took 0.96 to 0.98 ms.
+
+What that leaves: something in the driver's transfer path under WSL2 that is fixed when a filter instance (its stream and device buffers) is created. It was not traced further, and nothing in this repository's code selects between the two states. On native Linux the effect may not exist; that has not been tested.
+
+Consequence for reading the benchmark: a single launch can land in either state, so `scripts/bench.sh` also records seven separate launches, and the README reports their range.

@@ -4,6 +4,7 @@
 
 #include <cmath>
 #include <cstdint>
+#include <cstring>
 
 #include "gpu_pointcloud/filter.hpp"
 
@@ -20,6 +21,26 @@ constexpr float kIndexLimit = 1048576.0f;  // 2^20: indices live in [-2^20, 2^20
 constexpr std::int64_t kIndexOffset = 1 << 20;
 
 enum PointClass : std::uint8_t { kKept = 0, kNonFinite = 1, kOutOfRange = 2, kIndexOverflow = 3 };
+
+// Reads point i of a strided buffer. memcpy keeps this valid for any alignment on the host; the
+// compiler turns it into three plain loads.
+struct PointReader {
+  const std::uint8_t* data;
+  std::size_t stride, x_offset, y_offset, z_offset;
+
+  PointReader() = default;
+  explicit PointReader(const CloudView& v)
+      : data(v.data), stride(v.stride), x_offset(v.x_offset), y_offset(v.y_offset), z_offset(v.z_offset) {}
+
+  GPC_HOST_DEVICE PointXYZ operator()(std::size_t i) const {
+    const std::uint8_t* p = data + i * stride;
+    PointXYZ q;
+    memcpy(&q.x, p + x_offset, sizeof(float));
+    memcpy(&q.y, p + y_offset, sizeof(float));
+    memcpy(&q.z, p + z_offset, sizeof(float));
+    return q;
+  }
+};
 
 GPC_HOST_DEVICE inline bool is_finite(float v) { return (v - v) == 0.0f; }  // false for NaN and Inf
 

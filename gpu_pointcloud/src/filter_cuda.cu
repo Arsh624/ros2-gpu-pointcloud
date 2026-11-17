@@ -1,6 +1,7 @@
 // CUDA backend. Pipeline per frame, all on one stream with preallocated buffers:
 //
-//   H2D copy -> classify kernel (key + keep flag + reject counters)
+//   H2D copy (straight from the input buffer; x, y, z are read by offset on the device)
+//            -> classify kernel (key + keep flag + reject counters)
 //            -> cub::DeviceSelect::Flagged   (indices of kept points)
 //            -> gather kernel                (keys of kept points)
 //            -> cub::DeviceRadixSort         (sort (key, index) by the used key bits only)
@@ -76,7 +77,7 @@ struct Meta {
   int num_voxels;
 };
 
-__global__ void classify_kernel(const PointXYZ* points, int n, float voxel_size, double min_range,
+__global__ void classify_kernel(detail::PointReader points, int n, float voxel_size, double min_range,
                                 double max_range, KeyLayout layout, std::uint64_t* keys,
                                 std::uint8_t* keep, unsigned int* rejected) {
   __shared__ unsigned int block_rejected[3];
@@ -86,7 +87,7 @@ __global__ void classify_kernel(const PointXYZ* points, int n, float voxel_size,
   const int i = blockIdx.x * blockDim.x + threadIdx.x;
   if (i < n) {
     std::uint64_t key = 0;
-    const detail::PointClass c = detail::classify(points[i], voxel_size, min_range, max_range, key);
+    const detail::PointClass c = detail::classify(points(i), voxel_size, min_range, max_range, key);
     if (c == detail::kKept) {
       const std::uint64_t mask = (1ull << detail::kAxisBits) - 1;
       const std::uint64_t ix = (key >> (2 * detail::kAxisBits)) - layout.rebase;
@@ -117,9 +118,9 @@ struct Sum {
 };
 
 struct LoadPoint {
-  const PointXYZ* points;
+  detail::PointReader points;
   __host__ __device__ Sum operator()(std::uint32_t i) const {
-    const PointXYZ p = points[i];
+    const PointXYZ p = points(i);
     return {static_cast<double>(p.x), static_cast<double>(p.y), static_cast<double>(p.z), 1.0};
   }
 };
@@ -143,8 +144,8 @@ int blocks_for(int n) { return (n + kBlock - 1) / kBlock; }
 
 class CudaFilter final : public Filter {
  public:
-  CudaFilter(const FilterParams& params, std::size_t reserve_points)
-      : params_(params), layout_(make_key_layout(params)) {
+  CudaFilter(const FilterParams& params, std::size_t reserve_points, CudaInput input)
+      : params_(params), layout_(make_key_layout(params)), input_mode_(input) {
     GPC_CUDA_CHECK(cudaStreamCreate(&stream_));
     for (cudaEvent_t& ev : ev_) GPC_CUDA_CHECK(cudaEventCreate(&ev));
     GPC_CUDA_CHECK(cudaMalloc(&d_meta_, sizeof(Meta)));
@@ -154,6 +155,7 @@ class CudaFilter final : public Filter {
 
   ~CudaFilter() override {
     release_buffers();
+    cudaFree(d_input_);
     cudaFree(d_meta_);
     cudaFreeHost(h_meta_);
     cudaFree(d_temp_);
@@ -164,7 +166,9 @@ class CudaFilter final : public Filter {
   CudaFilter(const CudaFilter&) = delete;
   CudaFilter& operator=(const CudaFilter&) = delete;
 
-  FilterStats apply(const PointXYZ* in, std::size_t n_points, std::vector<PointXYZ>& out) override {
+  FilterStats apply(const CloudView& view, std::vector<PointXYZ>& out) override {
+    validate(view);
+    const std::size_t n_points = view.count;
     if (n_points > static_cast<std::size_t>(INT_MAX)) throw std::length_error("cloud has more than 2^31 - 1 points");
     FilterStats stats;
     stats.in = n_points;
@@ -174,10 +178,26 @@ class CudaFilter final : public Filter {
     const int n = static_cast<int>(n_points);
     mark(kBegin);
 
+    detail::PointReader device_points;
     {
       NvtxRange r("h2d");
-      std::memcpy(h_in_, in, n_points * sizeof(PointXYZ));
-      GPC_CUDA_CHECK(cudaMemcpyAsync(d_points_, h_in_, n_points * sizeof(PointXYZ), cudaMemcpyHostToDevice, stream_));
+      // The transfer goes straight from pageable host memory: on this platform that measured
+      // faster than staging through a pinned buffer (docs/DESIGN.md, "Input path").
+      const std::uint8_t* src = view.data;
+      CloudView layout = view;
+      if (!upload_raw(view)) {
+        // Gather x, y, z into a packed host buffer so only 12 bytes per point cross the bus.
+        const detail::PointReader read(view);
+        repacked_.resize(n_points);
+        for (std::size_t i = 0; i < n_points; ++i) repacked_[i] = read(i);
+        src = reinterpret_cast<const std::uint8_t*>(repacked_.data());
+        layout = as_view(repacked_.data(), n_points);
+      }
+      const std::size_t bytes = n_points * layout.stride;
+      ensure_input(bytes);
+      GPC_CUDA_CHECK(cudaMemcpyAsync(d_input_, src, bytes, cudaMemcpyHostToDevice, stream_));
+      layout.data = d_input_;
+      device_points = detail::PointReader(layout);
     }
     mark(kAfterH2D);
 
@@ -185,7 +205,7 @@ class CudaFilter final : public Filter {
     {
       NvtxRange r("classify+select");
       GPC_CUDA_CHECK(cudaMemsetAsync(d_meta_, 0, sizeof(Meta), stream_));
-      classify_kernel<<<blocks_for(n), kBlock, 0, stream_>>>(d_points_, n, params_.voxel_size, params_.min_range,
+      classify_kernel<<<blocks_for(n), kBlock, 0, stream_>>>(device_points, n, params_.voxel_size, params_.min_range,
                                                              params_.max_range, layout_, d_keys_a_, d_keep_,
                                                              d_meta_->rejected);
       GPC_CUDA_CHECK(cudaGetLastError());
@@ -228,7 +248,7 @@ class CudaFilter final : public Filter {
       mark(kAfterSort);
       {
         NvtxRange r("reduce_by_key");
-        cub::TransformInputIterator<Sum, LoadPoint, const std::uint32_t*> values(index.Current(), LoadPoint{d_points_});
+        cub::TransformInputIterator<Sum, LoadPoint, const std::uint32_t*> values(index.Current(), LoadPoint{device_points});
         cub::DiscardOutputIterator<> unique_keys;
         std::size_t bytes = 0;
         GPC_CUDA_CHECK(cub::DeviceReduce::ReduceByKey(nullptr, bytes, keys.Current(), unique_keys, values, d_sums_,
@@ -296,6 +316,26 @@ class CudaFilter final : public Filter {
     return ms;
   }
 
+  // Raw upload needs every field 4-byte aligned on the device; anything else is repacked on the
+  // host, where unaligned reads are fine. Packed xyz is always uploaded as it is.
+  bool upload_raw(const CloudView& v) const {
+    const bool packed = v.stride == sizeof(PointXYZ) && v.x_offset == 0 && v.y_offset == 4 && v.z_offset == 8;
+    if (packed) return true;
+    const bool aligned = v.stride % 4 == 0 && v.x_offset % 4 == 0 && v.y_offset % 4 == 0 && v.z_offset % 4 == 0;
+    if (!aligned || input_mode_ == CudaInput::kRepack) return false;
+    return input_mode_ == CudaInput::kRaw || v.stride <= kAutoRawMaxStride;
+  }
+
+  void ensure_input(std::size_t bytes) {
+    if (bytes <= input_bytes_) return;
+    GPC_CUDA_CHECK(cudaStreamSynchronize(stream_));
+    cudaFree(d_input_);
+    d_input_ = nullptr;
+    input_bytes_ = 0;
+    GPC_CUDA_CHECK(cudaMalloc(&d_input_, bytes));
+    input_bytes_ = bytes;
+  }
+
   void fetch_meta() {
     GPC_CUDA_CHECK(cudaMemcpyAsync(h_meta_, d_meta_, sizeof(Meta), cudaMemcpyDeviceToHost, stream_));
     GPC_CUDA_CHECK(cudaStreamSynchronize(stream_));
@@ -312,7 +352,6 @@ class CudaFilter final : public Filter {
   }
 
   void release_buffers() {
-    cudaFree(d_points_);
     cudaFree(d_keys_a_);
     cudaFree(d_keys_b_);
     cudaFree(d_keep_);
@@ -320,15 +359,13 @@ class CudaFilter final : public Filter {
     cudaFree(d_index_b_);
     cudaFree(d_sums_);
     cudaFree(d_out_);
-    cudaFreeHost(h_in_);
     cudaFreeHost(h_out_);
-    d_points_ = nullptr;
     d_keys_a_ = d_keys_b_ = nullptr;
     d_keep_ = nullptr;
     d_index_a_ = d_index_b_ = nullptr;
     d_sums_ = nullptr;
     d_out_ = nullptr;
-    h_in_ = h_out_ = nullptr;
+    h_out_ = nullptr;
     capacity_ = 0;
   }
 
@@ -337,7 +374,7 @@ class CudaFilter final : public Filter {
   void reserve(std::size_t n) {
     GPC_CUDA_CHECK(cudaStreamSynchronize(stream_));
     release_buffers();
-    GPC_CUDA_CHECK(cudaMalloc(&d_points_, n * sizeof(PointXYZ)));
+    ensure_input(n * sizeof(PointXYZ));
     GPC_CUDA_CHECK(cudaMalloc(&d_keys_a_, n * sizeof(std::uint64_t)));
     GPC_CUDA_CHECK(cudaMalloc(&d_keys_b_, n * sizeof(std::uint64_t)));
     GPC_CUDA_CHECK(cudaMalloc(&d_keep_, n * sizeof(std::uint8_t)));
@@ -345,7 +382,6 @@ class CudaFilter final : public Filter {
     GPC_CUDA_CHECK(cudaMalloc(&d_index_b_, n * sizeof(std::uint32_t)));
     GPC_CUDA_CHECK(cudaMalloc(&d_sums_, n * sizeof(Sum)));
     GPC_CUDA_CHECK(cudaMalloc(&d_out_, n * sizeof(PointXYZ)));
-    GPC_CUDA_CHECK(cudaMallocHost(&h_in_, n * sizeof(PointXYZ)));
     GPC_CUDA_CHECK(cudaMallocHost(&h_out_, n * sizeof(PointXYZ)));
     capacity_ = n;
 
@@ -358,7 +394,7 @@ class CudaFilter final : public Filter {
     cub::DoubleBuffer<std::uint64_t> keys(d_keys_b_, d_keys_a_);
     cub::DoubleBuffer<std::uint32_t> index(d_index_a_, d_index_b_);
     GPC_CUDA_CHECK(cub::DeviceRadixSort::SortPairs(nullptr, sort_bytes, keys, index, count, 0, 3 * layout_.bits, stream_));
-    cub::TransformInputIterator<Sum, LoadPoint, const std::uint32_t*> values(d_index_a_, LoadPoint{d_points_});
+    cub::TransformInputIterator<Sum, LoadPoint, const std::uint32_t*> values(d_index_a_, LoadPoint{detail::PointReader()});
     cub::DiscardOutputIterator<> unique_keys;
     GPC_CUDA_CHECK(cub::DeviceReduce::ReduceByKey(nullptr, reduce_bytes, d_keys_b_, unique_keys, values, d_sums_,
                                                   &d_meta_->num_voxels, AddSum{}, count, stream_));
@@ -371,8 +407,16 @@ class CudaFilter final : public Filter {
   cudaEvent_t ev_[kNumMarks] = {};
   double stage_ms_[kNumMarks - 1] = {};
 
+  // Auto mode uploads raw bytes up to this point stride and repacks wider points on the host.
+  // Measured in results/cuda_input_modes.csv: at 16 bytes raw wins at every size; at 32 bytes
+  // repack wins at 320x240 and 640x480 and loses slightly at 1280x720.
+  static constexpr std::size_t kAutoRawMaxStride = 16;
+  CudaInput input_mode_;
+  std::uint8_t* d_input_ = nullptr;  // the cloud as uploaded (raw or packed)
+  std::size_t input_bytes_ = 0;
+  std::vector<PointXYZ> repacked_;   // host staging for the repack path, reused across frames
+
   std::size_t capacity_ = 0;  // points the buffers below can hold
-  PointXYZ* d_points_ = nullptr;
   std::uint64_t* d_keys_a_ = nullptr;  // keys of all points, then the sort's alternate buffer
   std::uint64_t* d_keys_b_ = nullptr;  // keys of kept points
   std::uint8_t* d_keep_ = nullptr;
@@ -380,7 +424,6 @@ class CudaFilter final : public Filter {
   std::uint32_t* d_index_b_ = nullptr;  // sort's alternate buffer
   Sum* d_sums_ = nullptr;
   PointXYZ* d_out_ = nullptr;
-  PointXYZ* h_in_ = nullptr;   // pinned
   PointXYZ* h_out_ = nullptr;  // pinned
 
   Meta* d_meta_ = nullptr;
@@ -391,12 +434,12 @@ class CudaFilter final : public Filter {
 
 }  // namespace
 
-std::unique_ptr<Filter> make_cuda_filter(const FilterParams& params, std::size_t reserve_points) {
+std::unique_ptr<Filter> make_cuda_filter(const FilterParams& params, std::size_t reserve_points, CudaInput input) {
   validate(params);
   if (!cuda_device_present()) {
     throw std::runtime_error("backend 'cuda' requested but no CUDA device is visible");
   }
-  return std::make_unique<CudaFilter>(params, reserve_points);
+  return std::make_unique<CudaFilter>(params, reserve_points, input);
 }
 
 }  // namespace gpu_pointcloud

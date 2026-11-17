@@ -153,3 +153,24 @@ TEST(ParityExtra, StageTimesCoverTheDevicePipeline) {
   EXPECT_NEAR(device, s.device_ms, 0.01 + 0.02 * s.device_ms);
   EXPECT_TRUE(make_cpu_filter({})->last_stage_times().empty());
 }
+
+TEST(ParityExtra, RawAndRepackUploadsGiveTheSameResult) {
+  // A wide, 4-byte-aligned layout exercises both input paths; the CPU result is the reference.
+  SKIP_WITHOUT_GPU();
+  const auto cloud = make_synthetic_cloud(640, 480);
+  std::vector<PointXYZ> expected;
+  make_cpu_filter({})->apply(cloud.data(), cloud.size(), expected);
+  for (std::size_t stride : {16u, 32u}) {
+    const auto strided = gpu_pointcloud::cases::make_strided(cloud, stride, 0, 4, 8);
+    for (CudaInput mode : {CudaInput::kAuto, CudaInput::kRaw, CudaInput::kRepack}) {
+      std::vector<PointXYZ> got;
+      make_cuda_filter({}, cloud.size(), mode)->apply(strided.view, got);
+      ASSERT_EQ(got.size(), expected.size()) << "stride=" << stride << " mode=" << static_cast<int>(mode);
+      std::size_t same = 0;
+      for (std::size_t i = 0; i < got.size(); ++i) {
+        same += got[i].x == expected[i].x && got[i].y == expected[i].y && got[i].z == expected[i].z;
+      }
+      EXPECT_EQ(same, got.size()) << "stride=" << stride << " mode=" << static_cast<int>(mode);
+    }
+  }
+}

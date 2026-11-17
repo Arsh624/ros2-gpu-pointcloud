@@ -5,6 +5,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <memory>
+#include <stdexcept>
 #include <vector>
 
 namespace gpu_pointcloud {
@@ -37,8 +38,26 @@ struct StageTime {
   double ms;
 };
 
+// A read-only view of `count` points inside someone else's buffer: point i starts at
+// data + i * stride and holds float32 x, y, z at the given byte offsets. This is the layout of a
+// sensor_msgs/PointCloud2 without row padding, so a message can be filtered without repacking.
+// Offsets and stride need no particular alignment.
+struct CloudView {
+  const std::uint8_t* data = nullptr;
+  std::size_t count = 0;
+  std::size_t stride = sizeof(PointXYZ);
+  std::size_t x_offset = 0, y_offset = 4, z_offset = 8;
+};
+
+inline CloudView as_view(const PointXYZ* points, std::size_t n) {
+  return {reinterpret_cast<const std::uint8_t*>(points), n, sizeof(PointXYZ), 0, 4, 8};
+}
+
 // Throws std::invalid_argument unless voxel_size > 0, 0 <= min_range <= max_range, all finite.
 void validate(const FilterParams& params);
+// Throws std::invalid_argument when a field would extend past `stride`, or when count > 0 and
+// data is null.
+void validate(const CloudView& view);
 
 // Packs the voxel index of `p` into a sortable key: 21 bits per axis, x in the high bits.
 // Returns false (key untouched) when an index is outside [-2^20, 2^20). `p` must be finite.
@@ -49,8 +68,14 @@ bool voxel_key(const PointXYZ& p, float voxel_size, std::uint64_t& key);
 class Filter {
  public:
   virtual ~Filter() = default;
-  // `out` is replaced. `in` may be null when n == 0. Not thread-safe; reuse one instance per stream.
-  virtual FilterStats apply(const PointXYZ* in, std::size_t n, std::vector<PointXYZ>& out) = 0;
+  // Filters points read in place from a strided buffer. `out` is replaced.
+  // Throws std::invalid_argument when the view is malformed (see validate(const CloudView&)).
+  // Not thread-safe; reuse one instance per stream.
+  virtual FilterStats apply(const CloudView& in, std::vector<PointXYZ>& out) = 0;
+  // Convenience for packed points. `in` may be null when n == 0.
+  FilterStats apply(const PointXYZ* in, std::size_t n, std::vector<PointXYZ>& out) {
+    return apply(as_view(in, n), out);
+  }
   // Per-stage timings of the last non-empty apply() call, in pipeline order. Empty on backends
   // that do not measure stages (CPU).
   virtual std::vector<StageTime> last_stage_times() const { return {}; }
@@ -63,9 +88,17 @@ std::unique_ptr<Filter> make_cpu_filter(const FilterParams& params);
 std::unique_ptr<Filter> make_cpu_omp_filter(const FilterParams& params, int threads = 0);
 // Number of threads OpenMP uses by default on this machine.
 int default_cpu_threads();
+// How the CUDA backend gets a strided cloud onto the device.
+enum class CudaInput {
+  kAuto,    // raw for points up to 16 bytes, repack for wider ones (docs/DESIGN.md, "Input path")
+  kRaw,     // upload the bytes as they are and read x, y, z by offset on the device; layouts
+            // that are not 4-byte aligned are repacked, since the device cannot read them
+  kRepack,  // gather x, y, z into a packed host buffer first, then upload 12 bytes per point
+};
 // `reserve_points` sizes the preallocated device buffers; larger clouds grow them once.
 // Throws std::runtime_error when built without CUDA or when no device is usable.
-std::unique_ptr<Filter> make_cuda_filter(const FilterParams& params, std::size_t reserve_points);
+std::unique_ptr<Filter> make_cuda_filter(const FilterParams& params, std::size_t reserve_points,
+                                         CudaInput input = CudaInput::kAuto);
 
 // True when the library was compiled with the CUDA backend (WITH_CUDA=ON).
 bool cuda_compiled();
